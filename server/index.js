@@ -8,8 +8,9 @@ import { router } from './router.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.resolve(__dirname, '../public');
 
-const PORT = process.env.PORT || 8443;
-const USE_HTTP2 = process.env.USE_HTTP2 !== 'false';
+const PORT = process.env.PORT || 5000;
+const HOST = process.env.HOST || '0.0.0.0';
+const USE_HTTP2 = process.env.USE_HTTP2 === 'true';
 
 let server;
 
@@ -56,7 +57,14 @@ function handler(req, res) {
   }
 
   if (url.pathname === '/') {
-    serveStatic(req, res, 'index.html');
+    res.writeHead(200, { 'content-type': 'text/plain', 'cache-control': 'no-store' });
+    res.end('midas-proxy: ok\n');
+    return;
+  }
+
+  if (url.pathname === '/health') {
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
     return;
   }
 
@@ -82,11 +90,11 @@ if (USE_HTTP2) {
     console.log(`Midas server listening on HTTPS/2 port ${PORT}`);
   } catch (e) {
     server = http.createServer(handler);
-    console.log(`Midas server listening on HTTP/1.1 port ${PORT}`);
+    console.log(`Midas server listening on HTTP/1.1 ${HOST}:${PORT}`);
   }
 } else {
   server = http.createServer(handler);
-  console.log(`Midas server listening on HTTP/1.1 port ${PORT}`);
+  console.log(`Midas server listening on HTTP/1.1 ${HOST}:${PORT}`);
 }
 
-server.listen(PORT);
+server.listen(PORT, HOST);

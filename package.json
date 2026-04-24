@@ -1,0 +1,22 @@
+{
+  "name": "midas-proxy",
+  "version": "0.1.0",
+  "description": "Advanced proxy engine designed to bypass modern content-filtering detection systems",
+  "main": "server/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.js",
+    "start": "node server/index.js",
+    "dev": "node scripts/build.js && node server/index.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+

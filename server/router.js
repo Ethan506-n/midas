@@ -73,6 +73,152 @@ async function proxyRequest(req, res, targetUrl, passthrough = false) {
   });
 }
 
+function toProxyUrl(target) {
+  return '/_midas/browse?url=' + encodeURIComponent(target);
+}
+
+function resolveUrl(base, ref) {
+  try { return new URL(ref, base).toString(); } catch { return null; }
+}
+
+function rewriteHtml(html, baseUrl) {
+  html = html.replace(/<base[^>]*>/gi, '');
+
+  html = html.replace(
+    /\b(href|src|action|formaction|poster|data)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/gi,
+    (m, attr, _all, dq, sq, uq) => {
+      const v = (dq ?? sq ?? uq ?? '').trim();
+      if (!v) return m;
+      if (/^(#|javascript:|data:|mailto:|blob:|tel:|about:)/i.test(v)) return m;
+      const abs = resolveUrl(baseUrl, v);
+      if (!abs) return m;
+      return `${attr}="${toProxyUrl(abs)}"`;
+    }
+  );
+
+  html = html.replace(/\bsrcset\s*=\s*("([^"]*)"|'([^']*)')/gi, (m, _all, dq, sq) => {
+    const v = dq ?? sq ?? '';
+    const parts = v.split(',').map(p => {
+      const seg = p.trim().split(/\s+/);
+      const u = seg[0];
+      if (!u) return p;
+      const abs = resolveUrl(baseUrl, u);
+      if (!abs) return p;
+      seg[0] = toProxyUrl(abs);
+      return seg.join(' ');
+    });
+    return `srcset="${parts.join(', ')}"`;
+  });
+
+  html = html.replace(/url\(\s*("([^"]*)"|'([^']*)'|([^)]*))\)/gi, (m, _all, dq, sq, uq) => {
+    const v = (dq ?? sq ?? uq ?? '').trim();
+    if (!v || /^(data:|blob:|about:)/i.test(v)) return m;
+    const abs = resolveUrl(baseUrl, v);
+    if (!abs) return m;
+    return `url("${toProxyUrl(abs)}")`;
+  });
+
+  return html;
+}
+
+function rewriteCss(css, baseUrl) {
+  css = css.replace(/url\(\s*("([^"]*)"|'([^']*)'|([^)]*))\)/gi, (m, _all, dq, sq, uq) => {
+    const v = (dq ?? sq ?? uq ?? '').trim();
+    if (!v || /^(data:|blob:|about:)/i.test(v)) return m;
+    const abs = resolveUrl(baseUrl, v);
+    if (!abs) return m;
+    return `url("${toProxyUrl(abs)}")`;
+  });
+  css = css.replace(/@import\s+(?:url\()?\s*("([^"]*)"|'([^']*)')\s*\)?/gi, (m, _all, dq, sq) => {
+    const v = dq ?? sq ?? '';
+    const abs = resolveUrl(baseUrl, v);
+    if (!abs) return m;
+    return `@import url("${toProxyUrl(abs)}")`;
+  });
+  return css;
+}
+
+function browseHandler(req, res, targetUrl, depth = 0) {
+  let url;
+  try { url = new URL(targetUrl); } catch {
+    res.writeHead(400, { 'content-type': 'text/plain' });
+    res.end('bad url'); return;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    res.writeHead(400, { 'content-type': 'text/plain' });
+    res.end('unsupported protocol'); return;
+  }
+
+  const lib = url.protocol === 'https:' ? https : http;
+  const headers = {
+    'user-agent': req.headers['user-agent'] || 'Mozilla/5.0',
+    'accept': req.headers['accept'] || '*/*',
+    'accept-language': req.headers['accept-language'] || 'en-US,en;q=0.9',
+  };
+
+  const options = {
+    hostname: url.hostname,
+    port: url.port || (url.protocol === 'https:' ? 443 : 80),
+    path: url.pathname + url.search,
+    method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+    headers,
+    rejectUnauthorized: false,
+  };
+
+  const proxyReq = lib.request(options, (proxyRes) => {
+    if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location && depth < 5) {
+      const next = resolveUrl(url.toString(), proxyRes.headers.location);
+      proxyRes.resume();
+      if (next) {
+        res.writeHead(302, { location: toProxyUrl(next) });
+        res.end();
+        return;
+      }
+    }
+
+    const ct = (proxyRes.headers['content-type'] || '').toLowerCase();
+    const outHeaders = { ...proxyRes.headers };
+    delete outHeaders['content-security-policy'];
+    delete outHeaders['content-security-policy-report-only'];
+    delete outHeaders['strict-transport-security'];
+    delete outHeaders['x-frame-options'];
+    delete outHeaders['content-length'];
+    delete outHeaders['content-encoding'];
+    delete outHeaders['transfer-encoding'];
+    outHeaders['cache-control'] = 'no-store';
+
+    if (ct.includes('text/html')) {
+      const chunks = [];
+      proxyRes.on('data', c => chunks.push(c));
+      proxyRes.on('end', () => {
+        const html = rewriteHtml(Buffer.concat(chunks).toString('utf8'), url.toString());
+        outHeaders['content-type'] = 'text/html; charset=utf-8';
+        res.writeHead(proxyRes.statusCode, outHeaders);
+        res.end(html);
+      });
+    } else if (ct.includes('text/css')) {
+      const chunks = [];
+      proxyRes.on('data', c => chunks.push(c));
+      proxyRes.on('end', () => {
+        const css = rewriteCss(Buffer.concat(chunks).toString('utf8'), url.toString());
+        res.writeHead(proxyRes.statusCode, outHeaders);
+        res.end(css);
+      });
+    } else {
+      res.writeHead(proxyRes.statusCode, outHeaders);
+      proxyRes.pipe(res);
+    }
+  });
+
+  proxyReq.on('error', () => {
+    if (!res.headersSent) {
+      res.writeHead(502, { 'content-type': 'text/plain' });
+      res.end('proxy error');
+    }
+  });
+  proxyReq.end();
+}
+
 export function router(req, res, url) {
   setCors(res);
 
@@ -81,6 +227,13 @@ export function router(req, res, url) {
   }
 
   const pathname = url.pathname;
+
+  if (pathname === '/_midas/browse') {
+    const target = url.searchParams.get('url');
+    if (!target) { res.writeHead(400); res.end('missing url'); return; }
+    browseHandler(req, res, target);
+    return;
+  }
 
   if (pathname === '/_midas/session') {
     const sid = generateSessionId();

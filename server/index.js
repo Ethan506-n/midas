@@ -57,8 +57,31 @@ function handler(req, res) {
   }
 
   if (url.pathname === '/') {
-    res.writeHead(200, { 'content-type': 'text/plain', 'cache-control': 'no-store' });
-    res.end('midas-proxy: ok\n');
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(`<!doctype html>
+<html><head><meta charset="utf-8"><title>midas-proxy</title>
+<style>
+  html,body{margin:0;height:100%;font-family:system-ui,sans-serif;background:#111;color:#eee}
+  form{display:flex;gap:6px;padding:8px;background:#1b1b1b;border-bottom:1px solid #333}
+  input[type=text]{flex:1;padding:8px 10px;border:1px solid #333;background:#0d0d0d;color:#eee;border-radius:4px;font:inherit}
+  button{padding:8px 14px;border:0;background:#2d7;border-radius:4px;color:#000;font-weight:600;cursor:pointer}
+  iframe{width:100%;height:calc(100% - 50px);border:0;background:#fff}
+</style></head><body>
+<form id="f" onsubmit="go(event)">
+  <input id="u" type="text" placeholder="https://example.com" autofocus>
+  <button type="submit">Go</button>
+</form>
+<iframe id="frame" src="about:blank"></iframe>
+<script>
+  function go(e){
+    e.preventDefault();
+    let v=document.getElementById('u').value.trim();
+    if(!v) return;
+    if(!/^https?:\\/\\//i.test(v)) v='https://'+v;
+    document.getElementById('frame').src='/_midas/browse?url='+encodeURIComponent(v);
+  }
+</script>
+</body></html>`);
     return;
   }
 

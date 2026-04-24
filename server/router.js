@@ -1,8 +1,10 @@
 import http from 'http';
 import https from 'https';
+import zlib from 'zlib';
 import { URL } from 'url';
 
 const ACTIVE_TRANSPORTS = new Map();
+const COOKIE_JAR = new Map();
 
 function generateSessionId() {
   return Array.from({ length: 24 }, () =>
@@ -73,23 +75,79 @@ async function proxyRequest(req, res, targetUrl, passthrough = false) {
   });
 }
 
+const PROXY_PREFIX = '/_midas/browse';
+
 function toProxyUrl(target) {
-  return '/_midas/browse?url=' + encodeURIComponent(target);
+  return PROXY_PREFIX + '?url=' + encodeURIComponent(target);
+}
+
+function htmlDecode(s) {
+  return s
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;/g, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&nbsp;/g, ' ');
 }
 
 function resolveUrl(base, ref) {
-  try { return new URL(ref, base).toString(); } catch { return null; }
+  try { return new URL(htmlDecode(ref), base).toString(); } catch { return null; }
+}
+
+function isAlreadyProxied(v) {
+  return v.startsWith(PROXY_PREFIX) || v.startsWith('/_midas/');
+}
+
+function extractOriginalFromProxy(u) {
+  try {
+    const parsed = new URL(u, 'http://x');
+    if (!parsed.pathname.startsWith(PROXY_PREFIX)) return null;
+    return parsed.searchParams.get('url');
+  } catch { return null; }
+}
+
+function rewriteCss(css, baseUrl) {
+  css = css.replace(/url\(\s*("([^"]*)"|'([^']*)'|([^)]*))\)/gi, (m, _all, dq, sq, uq) => {
+    const v = (dq ?? sq ?? uq ?? '').trim();
+    if (!v || /^(data:|blob:|about:)/i.test(v) || isAlreadyProxied(v)) return m;
+    const abs = resolveUrl(baseUrl, v);
+    if (!abs) return m;
+    return `url("${toProxyUrl(abs)}")`;
+  });
+  css = css.replace(/@import\s+(?:url\()?\s*("([^"]*)"|'([^']*)')\s*\)?/gi, (m, _all, dq, sq) => {
+    const v = dq ?? sq ?? '';
+    if (isAlreadyProxied(v)) return m;
+    const abs = resolveUrl(baseUrl, v);
+    if (!abs) return m;
+    return `@import url("${toProxyUrl(abs)}")`;
+  });
+  return css;
 }
 
 function rewriteHtml(html, baseUrl) {
-  html = html.replace(/<base[^>]*>/gi, '');
+  html = html.replace(/<base\b[^>]*>/gi, '');
+
+  html = html.replace(/(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi,
+    (_m, open, body, close) => open + rewriteCss(body, baseUrl) + close);
+
+  html = html.replace(/<meta\s+http-equiv=["']?refresh["']?\s+content=["']([^"']+)["'][^>]*>/gi,
+    (m, content) => {
+      const mm = content.match(/^\s*([\d.]+)\s*;\s*url\s*=\s*(.+?)\s*$/i);
+      if (!mm) return m;
+      const abs = resolveUrl(baseUrl, mm[2]);
+      if (!abs) return m;
+      return m.replace(mm[2], toProxyUrl(abs));
+    });
 
   html = html.replace(
     /\b(href|src|action|formaction|poster|data)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/gi,
     (m, attr, _all, dq, sq, uq) => {
       const v = (dq ?? sq ?? uq ?? '').trim();
       if (!v) return m;
-      if (/^(#|javascript:|data:|mailto:|blob:|tel:|about:)/i.test(v)) return m;
+      if (/^(#|javascript:|data:|mailto:|blob:|tel:|about:|ws:|wss:)/i.test(v)) return m;
+      if (isAlreadyProxied(v)) return m;
       const abs = resolveUrl(baseUrl, v);
       if (!abs) return m;
       return `${attr}="${toProxyUrl(abs)}"`;
@@ -101,7 +159,7 @@ function rewriteHtml(html, baseUrl) {
     const parts = v.split(',').map(p => {
       const seg = p.trim().split(/\s+/);
       const u = seg[0];
-      if (!u) return p;
+      if (!u || isAlreadyProxied(u) || /^data:/i.test(u)) return p;
       const abs = resolveUrl(baseUrl, u);
       if (!abs) return p;
       seg[0] = toProxyUrl(abs);
@@ -112,7 +170,7 @@ function rewriteHtml(html, baseUrl) {
 
   html = html.replace(/url\(\s*("([^"]*)"|'([^']*)'|([^)]*))\)/gi, (m, _all, dq, sq, uq) => {
     const v = (dq ?? sq ?? uq ?? '').trim();
-    if (!v || /^(data:|blob:|about:)/i.test(v)) return m;
+    if (!v || /^(data:|blob:|about:)/i.test(v) || isAlreadyProxied(v)) return m;
     const abs = resolveUrl(baseUrl, v);
     if (!abs) return m;
     return `url("${toProxyUrl(abs)}")`;
@@ -121,62 +179,167 @@ function rewriteHtml(html, baseUrl) {
   return html;
 }
 
-function rewriteCss(css, baseUrl) {
-  css = css.replace(/url\(\s*("([^"]*)"|'([^']*)'|([^)]*))\)/gi, (m, _all, dq, sq, uq) => {
-    const v = (dq ?? sq ?? uq ?? '').trim();
-    if (!v || /^(data:|blob:|about:)/i.test(v)) return m;
-    const abs = resolveUrl(baseUrl, v);
-    if (!abs) return m;
-    return `url("${toProxyUrl(abs)}")`;
-  });
-  css = css.replace(/@import\s+(?:url\()?\s*("([^"]*)"|'([^']*)')\s*\)?/gi, (m, _all, dq, sq) => {
-    const v = dq ?? sq ?? '';
-    const abs = resolveUrl(baseUrl, v);
-    if (!abs) return m;
-    return `@import url("${toProxyUrl(abs)}")`;
-  });
-  return css;
+function parseCookieHeader(str) {
+  const out = {};
+  if (!str) return out;
+  for (const part of str.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+  }
+  return out;
+}
+
+function parseSetCookie(str) {
+  const parts = str.split(';').map(s => s.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  const nv = parts.shift();
+  const eq = nv.indexOf('=');
+  if (eq < 0) return null;
+  const cookie = {
+    name: nv.slice(0, eq).trim(),
+    value: nv.slice(eq + 1).trim(),
+    path: '/',
+    domain: null,
+    expires: null,
+    secure: false,
+  };
+  for (const a of parts) {
+    const ei = a.indexOf('=');
+    const k = (ei < 0 ? a : a.slice(0, ei)).trim().toLowerCase();
+    const v = ei < 0 ? '' : a.slice(ei + 1).trim();
+    if (k === 'path') cookie.path = v || '/';
+    else if (k === 'domain') cookie.domain = v.replace(/^\./, '').toLowerCase();
+    else if (k === 'expires') { const t = Date.parse(v); if (t) cookie.expires = t; }
+    else if (k === 'max-age') { const n = parseInt(v, 10); if (!isNaN(n)) cookie.expires = Date.now() + n * 1000; }
+    else if (k === 'secure') cookie.secure = true;
+  }
+  return cookie;
+}
+
+function getOrCreateSid(req, res) {
+  const cookies = parseCookieHeader(req.headers.cookie);
+  let sid = cookies.midas_sid;
+  if (!sid) {
+    sid = generateSessionId();
+    const prev = res.getHeader('set-cookie');
+    const next = `midas_sid=${sid}; Path=/; HttpOnly; SameSite=Lax`;
+    res.setHeader('set-cookie', prev ? [].concat(prev, next) : next);
+  }
+  return sid;
+}
+
+function jarFor(sid) {
+  let j = COOKIE_JAR.get(sid);
+  if (!j) { j = new Map(); COOKIE_JAR.set(sid, j); }
+  return j;
+}
+
+function hostMatches(cookieHost, requestHost) {
+  if (!cookieHost) return false;
+  if (cookieHost === requestHost) return true;
+  return requestHost.endsWith('.' + cookieHost);
+}
+
+function buildCookieHeader(jar, hostname, pathname, isHttps) {
+  const out = [];
+  const now = Date.now();
+  for (const [host, list] of jar) {
+    if (!hostMatches(host, hostname)) continue;
+    for (const c of list) {
+      if (c.expires && c.expires < now) continue;
+      if (!pathname.startsWith(c.path)) continue;
+      if (c.secure && !isHttps) continue;
+      out.push(`${c.name}=${c.value}`);
+    }
+  }
+  return out.join('; ');
+}
+
+function storeCookies(jar, hostname, setCookieHeaders) {
+  if (!setCookieHeaders) return;
+  const list = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
+  for (const sc of list) {
+    const cookie = parseSetCookie(sc);
+    if (!cookie) continue;
+    const host = cookie.domain || hostname;
+    let bucket = jar.get(host);
+    if (!bucket) { bucket = []; jar.set(host, bucket); }
+    const idx = bucket.findIndex(c => c.name === cookie.name && c.path === cookie.path);
+    if (idx >= 0) bucket[idx] = cookie; else bucket.push(cookie);
+  }
+}
+
+function decodeBody(buf, charset) {
+  try { return new TextDecoder(charset || 'utf-8', { fatal: false }).decode(buf); }
+  catch { return buf.toString('utf8'); }
 }
 
 function browseHandler(req, res, targetUrl, depth = 0) {
+  const sid = getOrCreateSid(req, res);
+  const jar = jarFor(sid);
+
   let url;
   try { url = new URL(targetUrl); } catch {
-    res.writeHead(400, { 'content-type': 'text/plain' });
-    res.end('bad url'); return;
+    res.writeHead(400, { 'content-type': 'text/plain' }); res.end('bad url'); return;
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    res.writeHead(400, { 'content-type': 'text/plain' });
-    res.end('unsupported protocol'); return;
+    res.writeHead(400, { 'content-type': 'text/plain' }); res.end('unsupported protocol'); return;
   }
 
-  const lib = url.protocol === 'https:' ? https : http;
-  const headers = {
-    'user-agent': req.headers['user-agent'] || 'Mozilla/5.0',
-    'accept': req.headers['accept'] || '*/*',
-    'accept-language': req.headers['accept-language'] || 'en-US,en;q=0.9',
-  };
+  // merge any extra query params (e.g. from a GET form on a proxied page) into the real target
+  const reqUrl = new URL(req.url, 'http://x');
+  for (const [k, v] of reqUrl.searchParams) {
+    if (k === 'url') continue;
+    url.searchParams.append(k, v);
+  }
+
+  const isHttps = url.protocol === 'https:';
+  const lib = isHttps ? https : http;
+
+  // build outgoing headers
+  const headers = {};
+  headers['user-agent'] = req.headers['user-agent'] || 'Mozilla/5.0 (compatible; midas-proxy/0.1)';
+  headers['accept'] = req.headers['accept'] || 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8';
+  headers['accept-language'] = req.headers['accept-language'] || 'en-US,en;q=0.9';
+  headers['accept-encoding'] = 'gzip, deflate, br';
+  if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
+
+  // referer rewriting
+  const refOriginal = extractOriginalFromProxy(req.headers.referer || '');
+  if (refOriginal) headers['referer'] = refOriginal;
+
+  // cookie jar -> outgoing Cookie
+  const cookieHeader = buildCookieHeader(jar, url.hostname, url.pathname, isHttps);
+  if (cookieHeader) headers['cookie'] = cookieHeader;
 
   const options = {
     hostname: url.hostname,
-    port: url.port || (url.protocol === 'https:' ? 443 : 80),
+    port: url.port || (isHttps ? 443 : 80),
     path: url.pathname + url.search,
-    method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+    method: req.method,
     headers,
     rejectUnauthorized: false,
   };
 
   const proxyReq = lib.request(options, (proxyRes) => {
-    if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location && depth < 5) {
+    // store any Set-Cookie regardless of redirect
+    storeCookies(jar, url.hostname, proxyRes.headers['set-cookie']);
+
+    if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location && depth < 8) {
       const next = resolveUrl(url.toString(), proxyRes.headers.location);
       proxyRes.resume();
       if (next) {
-        res.writeHead(302, { location: toProxyUrl(next) });
+        res.writeHead(302, { location: toProxyUrl(next), 'cache-control': 'no-store' });
         res.end();
         return;
       }
     }
 
     const ct = (proxyRes.headers['content-type'] || '').toLowerCase();
+    const charsetMatch = ct.match(/charset=([^\s;]+)/i);
+    const charset = charsetMatch ? charsetMatch[1] : 'utf-8';
+
     const outHeaders = { ...proxyRes.headers };
     delete outHeaders['content-security-policy'];
     delete outHeaders['content-security-policy-report-only'];
@@ -185,28 +348,35 @@ function browseHandler(req, res, targetUrl, depth = 0) {
     delete outHeaders['content-length'];
     delete outHeaders['content-encoding'];
     delete outHeaders['transfer-encoding'];
+    delete outHeaders['set-cookie'];
+    delete outHeaders['alt-svc'];
     outHeaders['cache-control'] = 'no-store';
 
-    if (ct.includes('text/html')) {
+    // decompression
+    const enc = (proxyRes.headers['content-encoding'] || '').toLowerCase();
+    let stream = proxyRes;
+    if (enc === 'gzip') stream = proxyRes.pipe(zlib.createGunzip());
+    else if (enc === 'deflate') stream = proxyRes.pipe(zlib.createInflate());
+    else if (enc === 'br') stream = proxyRes.pipe(zlib.createBrotliDecompress());
+
+    const isHtml = ct.includes('text/html') || ct.includes('application/xhtml');
+    const isCss = ct.includes('text/css');
+
+    if (isHtml || isCss) {
       const chunks = [];
-      proxyRes.on('data', c => chunks.push(c));
-      proxyRes.on('end', () => {
-        const html = rewriteHtml(Buffer.concat(chunks).toString('utf8'), url.toString());
-        outHeaders['content-type'] = 'text/html; charset=utf-8';
+      stream.on('data', c => chunks.push(c));
+      stream.on('error', () => { if (!res.headersSent) { res.writeHead(502); res.end('decode error'); } });
+      stream.on('end', () => {
+        const buf = Buffer.concat(chunks);
+        const text = decodeBody(buf, charset);
+        const out = isHtml ? rewriteHtml(text, url.toString()) : rewriteCss(text, url.toString());
+        outHeaders['content-type'] = isHtml ? 'text/html; charset=utf-8' : 'text/css; charset=utf-8';
         res.writeHead(proxyRes.statusCode, outHeaders);
-        res.end(html);
-      });
-    } else if (ct.includes('text/css')) {
-      const chunks = [];
-      proxyRes.on('data', c => chunks.push(c));
-      proxyRes.on('end', () => {
-        const css = rewriteCss(Buffer.concat(chunks).toString('utf8'), url.toString());
-        res.writeHead(proxyRes.statusCode, outHeaders);
-        res.end(css);
+        res.end(out);
       });
     } else {
       res.writeHead(proxyRes.statusCode, outHeaders);
-      proxyRes.pipe(res);
+      stream.pipe(res);
     }
   });
 
@@ -216,7 +386,12 @@ function browseHandler(req, res, targetUrl, depth = 0) {
       res.end('proxy error');
     }
   });
-  proxyReq.end();
+
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    req.pipe(proxyReq);
+  } else {
+    proxyReq.end();
+  }
 }
 
 export function router(req, res, url) {

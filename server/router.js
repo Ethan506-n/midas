@@ -189,11 +189,6 @@ function rewriteHtml(html, baseUrl) {
     return `url("${toProxyUrl(abs)}")`;
   });
 
-  // Inject anti-detection script into <head> of every HTML page
-  html = html.replace(/<head\b[^>]*>/i, (m) => {
-    return m + '\n<script data-midas-shim>/* midas-shim */</script>\n';
-  });
-
   return html;
 }
 
@@ -315,7 +310,7 @@ function browseHandler(req, res, targetUrl, depth = 0) {
   const lib = isHttps ? https : http;
 
   const headers = {};
-  headers['user-agent'] = req.headers['user-agent'] || 'Mozilla/5.0 (compatible; midas-proxy/0.1)';
+  headers['user-agent'] = req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
   headers['accept'] = req.headers['accept'] || 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8';
   headers['accept-language'] = req.headers['accept-language'] || 'en-US,en;q=0.9';
   headers['accept-encoding'] = 'gzip, deflate, br';

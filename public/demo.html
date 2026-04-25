@@ -32,7 +32,7 @@
     border-radius: 12px;
     padding: 1.5rem;
     width: 100%;
-    max-width: 700px;
+    max-width: 900px;
     margin-bottom: 1rem;
     border: 1px solid #2a2a4e;
   }
@@ -71,6 +71,11 @@
   }
   button:hover { opacity: 0.9; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-secondary {
+    background: #2a2a4e;
+    padding: 0.5rem 1rem;
+    font-size: 0.85rem;
+  }
   .status {
     font-family: monospace;
     font-size: 0.85rem;
@@ -86,7 +91,7 @@
   .status.error { border-color: #f44336; color: #ef9a9a; }
   .features {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 0.75rem;
     margin-top: 1rem;
   }
@@ -103,10 +108,16 @@
     display: block;
     margin-bottom: 0.25rem;
   }
+  .quick-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
   .iframe-container {
     width: 100%;
-    max-width: 900px;
-    height: 500px;
+    max-width: 1000px;
+    height: 600px;
     border-radius: 12px;
     overflow: hidden;
     border: 1px solid #2a2a4e;
@@ -128,10 +139,17 @@
 <div class="card">
   <h2>Navigate</h2>
   <div class="input-group">
-    <input type="text" id="urlInput" placeholder="https://example.com" value="https://example.com">
+    <input type="text" id="urlInput" placeholder="https://example.com" value="https://duckduckgo.com">
     <button id="goBtn" onclick="navigate()">Go</button>
   </div>
-  <div class="status" id="navStatus">Ready</div>
+  <div class="quick-links">
+    <button class="btn-secondary" onclick="loadUrl('https://duckduckgo.com')">DuckDuckGo Full</button>
+    <button class="btn-secondary" onclick="loadUrl('https://lite.duckduckgo.com/lite/')">DuckDuckGo Lite</button>
+    <button class="btn-secondary" onclick="loadUrl('https://html.duckduckgo.com/html/')">DuckDuckGo HTML</button>
+    <button class="btn-secondary" onclick="loadUrl('https://en.wikipedia.org/wiki/Main_Page')">Wikipedia</button>
+    <button class="btn-secondary" onclick="loadUrl('https://news.ycombinator.com')">Hacker News</button>
+  </div>
+  <div class="status" id="navStatus">Ready — select a site above or enter any URL</div>
 </div>
 
 <div class="card">
@@ -153,6 +171,14 @@
       <span class="label">Fingerprint</span>
       <span id="fpStatus">Checking...</span>
     </div>
+    <div class="feature">
+      <span class="label">Paths</span>
+      <span id="pathStatus">Checking...</span>
+    </div>
+    <div class="feature">
+      <span class="label">Detection</span>
+      <span id="detectStatus">Checking...</span>
+    </div>
   </div>
 </div>
 
@@ -166,7 +192,7 @@
 </div>
 
 <div class="iframe-container">
-  <iframe id="proxyFrame" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+  <iframe id="proxyFrame" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation"></iframe>
 </div>
 
 <script src="loader.js"></script>
@@ -177,27 +203,35 @@
   const swStatus = document.getElementById('swStatus');
   const envStatus = document.getElementById('envStatus');
   const fpStatus = document.getElementById('fpStatus');
+  const pathStatus = document.getElementById('pathStatus');
+  const detectStatus = document.getElementById('detectStatus');
   const proxyFrame = document.getElementById('proxyFrame');
+  const urlInput = document.getElementById('urlInput');
+
+  function getBrowsePath() {
+    if (window.__midasPaths && window.__midasPaths.browse) {
+      return '/_midas/' + window.__midasPaths.browse;
+    }
+    return '/_midas/browse';
+  }
+
+  function loadUrl(url) {
+    urlInput.value = url;
+    navigate();
+  }
 
   async function navigate() {
-    const url = document.getElementById('urlInput').value;
+    const url = urlInput.value.trim();
     if (!url) return;
     navStatus.textContent = 'Loading ' + url + '...';
     navStatus.className = 'status';
-    
+
     try {
-      if (typeof midasFetch === 'function') {
-        const resp = await midasFetch(url);
-        const html = await resp.text();
-        proxyFrame.srcdoc = html;
-        navStatus.textContent = 'Loaded: ' + url + ' (status: ' + resp.status + ')';
-        navStatus.className = 'status success';
-      } else {
-        // Fallback before midas is ready
-        proxyFrame.src = '/_midas/browse?url=' + encodeURIComponent(url);
-        navStatus.textContent = 'Fallback load: ' + url;
-        navStatus.className = 'status success';
-      }
+      const browsePath = getBrowsePath();
+      const proxyUrl = browsePath + '?url=' + encodeURIComponent(url);
+      proxyFrame.src = proxyUrl;
+      navStatus.textContent = 'Loaded via proxy: ' + url;
+      navStatus.className = 'status success';
     } catch (err) {
       navStatus.textContent = 'Error: ' + err.message;
       navStatus.className = 'status error';
@@ -208,7 +242,7 @@
     const url = document.getElementById('wsUrl').value;
     wsStatus.textContent = 'Connecting to ' + url + '...';
     wsStatus.className = 'status';
-    
+
     try {
       const ws = new WebSocket(url);
       ws.onopen = () => {
@@ -245,7 +279,7 @@
         transportStatus.textContent = 'Not ready';
       }
     }
-    
+
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.ready.then(() => {
         swStatus.textContent = 'Active';
@@ -255,21 +289,33 @@
     } else {
       swStatus.textContent = 'Unsupported';
     }
-    
+
     if (typeof isEnvironmentSafe === 'function') {
       const status = isEnvironmentSafe();
       envStatus.textContent = status ? 'Safe' : 'Unsafe';
       envStatus.style.color = status ? '#4caf50' : '#f44336';
     }
-    
+
     if (typeof getFingerprint === 'function') {
       const fp = getFingerprint();
       fpStatus.textContent = fp.canvasHash ? 'Randomized' : 'Native';
     }
+
+    if (window.__midasPaths) {
+      pathStatus.textContent = 'Rotating';
+    } else {
+      pathStatus.textContent = 'Legacy';
+    }
+
+    if (typeof getEnvironmentStatus === 'function') {
+      const s = getEnvironmentStatus();
+      detectStatus.textContent = s.devtools ? 'DevTools!' : (s.instrumentation ? 'Instr!' : 'Clean');
+      detectStatus.style.color = s.devtools || s.instrumentation ? '#f44336' : '#4caf50';
+    }
   }, 2000);
 
   // Handle enter key
-  document.getElementById('urlInput').addEventListener('keypress', (e) => {
+  urlInput.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') navigate();
   });
 </script>

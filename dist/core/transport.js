@@ -1,7 +1,18 @@
 /**
- * Transport layer with multiple strategies.
+ * Transport layer with multiple strategies and polymorphic path support.
  * Prioritizes SSE and chunked fetch to avoid WebSocket tunnel signatures.
  */
+// Dynamic paths from server session response
+let dynamicPaths = {};
+export function setDynamicPaths(paths) {
+    dynamicPaths = paths;
+}
+function endpoint(pathKey) {
+    const p = dynamicPaths[pathKey];
+    if (p)
+        return '/_midas/' + p;
+    return '/_midas/' + pathKey;
+}
 let currentTransport = null;
 class BaseTransport {
     baseUrl;
@@ -10,8 +21,8 @@ class BaseTransport {
         this.baseUrl = cfg.baseUrl.replace(/\/$/, '');
         this.sessionId = cfg.sessionId;
     }
-    endpoint(path) {
-        return `${this.baseUrl}${path}`;
+    buildUrl(pathKey) {
+        return `${this.baseUrl}${endpoint(pathKey)}`;
     }
 }
 class ChunkedTransport extends BaseTransport {
@@ -23,7 +34,7 @@ class ChunkedTransport extends BaseTransport {
             body: req.body && typeof req.body === 'string' ? req.body : undefined,
             sid: this.sessionId,
         });
-        const resp = await fetch(this.endpoint('/_midas/chunk'), {
+        const resp = await fetch(this.buildUrl('chunk'), {
             method: 'POST',
             headers: {
                 'content-type': 'application/json',
@@ -66,7 +77,7 @@ class SseTransport extends BaseTransport {
             body: req.body && typeof req.body === 'string' ? req.body : undefined,
             sid: this.sessionId,
         });
-        const resp = await fetch(this.endpoint('/_midas/fetch'), {
+        const resp = await fetch(this.buildUrl('fetch'), {
             method: 'POST',
             headers: {
                 'content-type': 'application/json',
@@ -96,7 +107,7 @@ class SimpleFetchTransport extends BaseTransport {
             sid: this.sessionId,
             passthrough: false,
         });
-        const resp = await fetch(this.endpoint('/_midas/fetch'), {
+        const resp = await fetch(this.buildUrl('fetch'), {
             method: 'POST',
             headers: {
                 'content-type': 'application/json',
@@ -119,7 +130,7 @@ class SimpleFetchTransport extends BaseTransport {
 export async function initTransport(cfg) {
     let type = cfg.preferred || 'chunked';
     try {
-        const test = await fetch(`${cfg.baseUrl}/_midas/session?t=${type}`, { method: 'HEAD' });
+        const test = await fetch(`${cfg.baseUrl}${endpoint('session')}?t=${type}`, { method: 'HEAD' });
         if (!test.ok)
             type = 'fetch';
     }

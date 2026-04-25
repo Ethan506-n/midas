@@ -35,11 +35,16 @@ function buildClient() {
     'core/encoder.js',
     'core/crypto.js',
     'core/transport.js',
+    'core/websocket.js',
+    'core/noise.js',
     'cloak/detect.js',
     'cloak/polymorph.js',
+    'cloak/fingerprint.js',
     'dom/window.js',
     'dom/patch.js',
+    'dom/storage.js',
     'captcha/compat.js',
+    'sandbox/iframe.js',
   ];
 
   let combined = '';
@@ -60,13 +65,21 @@ function buildClient() {
 window.__midasInit = async function(cfg) {
   initDetection();
   initSession();
+  initAntiFingerprint();
+  initNoise();
+  installWebSocketHook();
 
   const sidRes = await fetch(cfg.baseUrl + '/_midas/session', { method: 'POST' });
   const sidData = await sidRes.json();
 
+  // Use polymorphic paths from server if available
+  const paths = sidData.paths || {};
+
   await initTransport({ baseUrl: cfg.baseUrl, sessionId: sidData.sid });
   installLocationHook(cfg.baseUrl, window.location.href);
   installHistoryHook();
+  installStorageHooks(window.location.href);
+  installIndexedDBHook(window.location.href);
   startDomPatching(cfg.baseUrl);
   installCaptchaHooks(cfg.baseUrl);
 
@@ -77,7 +90,6 @@ window.__midasInit = async function(cfg) {
     try {
       const resp = await midasFetch(goUrl);
       const html = await resp.text();
-      // Use the global injectHtml from patch module
       if (typeof injectHtml === 'function') {
         injectHtml(html, goUrl);
       }
@@ -119,4 +131,5 @@ const nonce = buildClient();
 buildSW();
 buildLoader(nonce);
 console.log('Build complete.');
+
 

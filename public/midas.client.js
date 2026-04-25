@@ -1,5 +1,5 @@
 (function(){
-const __MIDAS_NONCE__='876904a8a0b49c56';
+const __MIDAS_NONCE__='eb64606916f1d8dd';
 
 /* module: core/encoder.js */
 /**
@@ -180,9 +180,20 @@ async function decryptData(data) {
 
 /* module: core/transport.js */
 /**
- * Transport layer with multiple strategies.
+ * Transport layer with multiple strategies and polymorphic path support.
  * Prioritizes SSE and chunked fetch to avoid WebSocket tunnel signatures.
  */
+// Dynamic paths from server session response
+let dynamicPaths = {};
+function setDynamicPaths(paths) {
+    dynamicPaths = paths;
+}
+function endpoint(pathKey) {
+    const p = dynamicPaths[pathKey];
+    if (p)
+        return '/_midas/' + p;
+    return '/_midas/' + pathKey;
+}
 let currentTransport = null;
 class BaseTransport {
     baseUrl;
@@ -191,8 +202,8 @@ class BaseTransport {
         this.baseUrl = cfg.baseUrl.replace(/\/$/, '');
         this.sessionId = cfg.sessionId;
     }
-    endpoint(path) {
-        return `${this.baseUrl}${path}`;
+    buildUrl(pathKey) {
+        return `${this.baseUrl}${endpoint(pathKey)}`;
     }
 }
 class ChunkedTransport extends BaseTransport {
@@ -204,7 +215,7 @@ class ChunkedTransport extends BaseTransport {
             body: req.body && typeof req.body === 'string' ? req.body : undefined,
             sid: this.sessionId,
         });
-        const resp = await fetch(this.endpoint('/_midas/chunk'), {
+        const resp = await fetch(this.buildUrl('chunk'), {
             method: 'POST',
             headers: {
                 'content-type': 'application/json',
@@ -247,7 +258,7 @@ class SseTransport extends BaseTransport {
             body: req.body && typeof req.body === 'string' ? req.body : undefined,
             sid: this.sessionId,
         });
-        const resp = await fetch(this.endpoint('/_midas/fetch'), {
+        const resp = await fetch(this.buildUrl('fetch'), {
             method: 'POST',
             headers: {
                 'content-type': 'application/json',
@@ -277,7 +288,7 @@ class SimpleFetchTransport extends BaseTransport {
             sid: this.sessionId,
             passthrough: false,
         });
-        const resp = await fetch(this.endpoint('/_midas/fetch'), {
+        const resp = await fetch(this.buildUrl('fetch'), {
             method: 'POST',
             headers: {
                 'content-type': 'application/json',
@@ -300,7 +311,7 @@ class SimpleFetchTransport extends BaseTransport {
 async function initTransport(cfg) {
     let type = cfg.preferred || 'chunked';
     try {
-        const test = await fetch(`${cfg.baseUrl}/_midas/session?t=${type}`, { method: 'HEAD' });
+        const test = await fetch(`${cfg.baseUrl}${endpoint('session')}?t=${type}`, { method: 'HEAD' });
         if (!test.ok)
             type = 'fetch';
     }
@@ -338,6 +349,319 @@ async function midasFetch(url, init) {
         status: resp.status,
         headers: resp.headers,
     });
+}
+
+
+/* module: core/websocket.js */
+/**
+ * WebSocket-over-HTTP Bridge Client
+ * Emulates WebSocket API while tunneling all traffic over standard HTTP.
+ * Avoids WebSocket connection signatures that Lightspeed detects.
+ */
+
+const REAL_WEBSOCKET = window.WebSocket;
+class MidasWebSocket extends EventTarget {
+    url;
+    protocol;
+    extensions;
+    bufferedAmount = 0;
+    binaryType = 'blob';
+    _readyState = 0;
+    _bridgeUrl;
+    _pollInterval = 100;
+    _pollTimer = null;
+    _sendQueue = [];
+    _lastReceiveId = 0;
+    _sendId = 0;
+    _listeners = new Map();
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSING = 2;
+    static CLOSED = 3;
+    constructor(url, protocols) {
+        super();
+        this.url = url.toString();
+        this.protocol = Array.isArray(protocols) ? protocols[0] : (protocols || '');
+        this.extensions = '';
+        this._bridgeUrl = this._buildBridgeUrl();
+        // Defer connection to avoid synchronous execution patterns
+        setTimeout(() => this._connect(), 0);
+    }
+    get readyState() { return this._readyState; }
+    get onopen() { return this._getHandler('open'); }
+    set onopen(v) { this._setHandler('open', v); }
+    get onmessage() { return this._getHandler('message'); }
+    set onmessage(v) { this._setHandler('message', v); }
+    get onclose() { return this._getHandler('close'); }
+    set onclose(v) { this._setHandler('close', v); }
+    get onerror() { return this._getHandler('error'); }
+    set onerror(v) { this._setHandler('error', v); }
+    send(data) {
+        if (this._readyState !== 1) {
+            throw new Error('WebSocket is not open');
+        }
+        let payload;
+        if (typeof data === 'string') {
+            payload = data;
+        }
+        else if (data instanceof ArrayBuffer) {
+            payload = btoa(String.fromCharCode(...new Uint8Array(data)));
+        }
+        else if (ArrayBuffer.isView(data)) {
+            payload = btoa(String.fromCharCode(...new Uint8Array(data.buffer, data.byteOffset, data.byteLength)));
+        }
+        else if (data instanceof Blob) {
+            const reader = new FileReader();
+            reader.onload = () => this.send(reader.result);
+            reader.readAsArrayBuffer(data);
+            return;
+        }
+        else {
+            payload = String(data);
+        }
+        this._sendQueue.push(payload);
+        this._flushSend();
+    }
+    close(code, reason) {
+        this._readyState = 2;
+        this._stopPolling();
+        this._signalClose(code || 1000, reason || '');
+    }
+    _buildBridgeUrl() {
+        // Use the transport layer's base URL
+        try {
+            const t = getTransport();
+            return t.baseUrl || window.location.origin;
+        }
+        catch {
+            return window.location.origin;
+        }
+    }
+    async _connect() {
+        try {
+            const resp = await fetch(`${this._bridgeUrl}/_midas/wsbridge/open`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ url: this.url, protocol: this.protocol }),
+            });
+            if (!resp.ok)
+                throw new Error('Bridge open failed');
+            const data = await resp.json();
+            this._bridgeSession = data.sid;
+            this._readyState = 1;
+            this._dispatch('open', new Event('open'));
+            this._startPolling();
+        }
+        catch (e) {
+            this._readyState = 3;
+            this._dispatch('error', new Event('error'));
+            this._dispatch('close', new CloseEvent('close', { wasClean: false, code: 1006 }));
+        }
+    }
+    async _flushSend() {
+        const sid = this._bridgeSession;
+        if (!sid || !this._sendQueue.length)
+            return;
+        const batch = this._sendQueue.splice(0, this._sendQueue.length);
+        try {
+            await fetch(`${this._bridgeUrl}/_midas/wsbridge/send`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ sid, messages: batch }),
+            });
+        }
+        catch (e) {
+            // Queue for retry
+            this._sendQueue.unshift(...batch);
+        }
+    }
+    _startPolling() {
+        const sid = this._bridgeSession;
+        if (!sid)
+            return;
+        this._pollTimer = setInterval(async () => {
+            try {
+                const resp = await fetch(`${this._bridgeUrl}/_midas/wsbridge/poll?sid=${sid}&last=${this._lastReceiveId}`, {
+                    method: 'GET',
+                });
+                if (!resp.ok)
+                    return;
+                const data = await resp.json();
+                if (data.messages) {
+                    for (const msg of data.messages) {
+                        this._lastReceiveId = msg.id;
+                        const event = new MessageEvent('message', {
+                            data: msg.text || msg.binary,
+                            origin: this.url,
+                        });
+                        this._dispatch('message', event);
+                    }
+                }
+                if (data.closed) {
+                    this._stopPolling();
+                    this._signalClose(data.closeCode || 1000, data.closeReason || '');
+                }
+            }
+            catch (e) {
+                // Silent failure, continue polling
+            }
+        }, this._pollInterval + Math.floor(Math.random() * 50));
+    }
+    _stopPolling() {
+        if (this._pollTimer) {
+            clearInterval(this._pollTimer);
+            this._pollTimer = null;
+        }
+    }
+    _signalClose(code, reason) {
+        this._readyState = 3;
+        this._dispatch('close', new CloseEvent('close', { wasClean: code === 1000, code, reason }));
+    }
+    _dispatch(type, event) {
+        this.dispatchEvent(event);
+        const handler = this._getHandler(type);
+        if (handler) {
+            if (typeof handler === 'function')
+                handler.call(this, event);
+            else
+                handler.handleEvent(event);
+        }
+    }
+    _getHandler(type) {
+        const key = `__ws_on_${type}`;
+        return this[key] || null;
+    }
+    _setHandler(type, v) {
+        const key = `__ws_on_${type}`;
+        this[key] = v;
+    }
+}
+function installWebSocketHook() {
+    // Replace global WebSocket with our bridge
+    const descriptor = Object.getOwnPropertyDescriptor(window, 'WebSocket');
+    if (descriptor && descriptor.configurable) {
+        Object.defineProperty(window, 'WebSocket', {
+            value: MidasWebSocket,
+            configurable: true,
+            writable: true,
+        });
+    }
+    else {
+        window.WebSocket = MidasWebSocket;
+    }
+    // Preserve the original for internal use if needed
+    createHiddenProperty(window, '__midas_ws_real', REAL_WEBSOCKET);
+}
+function uninstallWebSocketHook() {
+    const real = window.__midas_ws_real;
+    if (real) {
+        window.WebSocket = real;
+    }
+}
+function createHiddenProperty(obj, key, value) {
+    Object.defineProperty(obj, key, {
+        value, writable: true, configurable: true, enumerable: false,
+    });
+}
+
+
+/* module: core/noise.js */
+/**
+ * Traffic Noise Injection Module
+ * Adds decoy requests and payload padding to break traffic pattern analysis.
+ */
+let config = {
+    enabled: true,
+    decoyProbability: 0.1,
+    minDecoyInterval: 5000,
+    maxDecoyInterval: 30000,
+    paddingEnabled: false,
+};
+let noiseTimer = null;
+let isRunning = false;
+const DECOY_ENDPOINTS = [
+    '/favicon.ico',
+    '/robots.txt',
+    '/sitemap.xml',
+    '/.well-known/security.txt',
+    '/assets/logo.png',
+    '/assets/icon.svg',
+];
+const DECOY_ORIGINS = [
+    'https://www.google.com',
+    'https://cdnjs.cloudflare.com',
+    'https://fonts.googleapis.com',
+    'https://ajax.googleapis.com',
+    'https://unpkg.com',
+];
+function initNoise(cfg = {}) {
+    config = { ...config, ...cfg };
+    if (config.enabled)
+        startNoise();
+}
+function stopNoise() {
+    isRunning = false;
+    if (noiseTimer) {
+        clearTimeout(noiseTimer);
+        noiseTimer = null;
+    }
+}
+function startNoise() {
+    if (isRunning)
+        return;
+    isRunning = true;
+    scheduleNextDecoy();
+}
+function scheduleNextDecoy() {
+    if (!isRunning)
+        return;
+    const delay = config.minDecoyInterval + Math.random() * (config.maxDecoyInterval - config.minDecoyInterval);
+    noiseTimer = setTimeout(() => {
+        if (Math.random() < config.decoyProbability) {
+            sendDecoyRequest();
+        }
+        scheduleNextDecoy();
+    }, delay);
+}
+function sendDecoyRequest() {
+    try {
+        const endpoint = DECOY_ENDPOINTS[Math.floor(Math.random() * DECOY_ENDPOINTS.length)];
+        const origin = DECOY_ORIGINS[Math.floor(Math.random() * DECOY_ORIGINS.length)];
+        const url = origin + endpoint + '?_=' + Math.random().toString(36).slice(2);
+        // Use fetch with no-cors to avoid CORS issues and make it look like a normal resource load
+        fetch(url, { mode: 'no-cors', cache: 'no-store' }).catch(() => {
+            // Expected to fail or be opaque, that's fine
+        });
+    }
+    catch (e) {
+        // Silent failure
+    }
+}
+function padPayload(data) {
+    if (!config.paddingEnabled)
+        return data;
+    const paddingSize = Math.floor(Math.random() * 256);
+    const padded = new Uint8Array(data.byteLength + paddingSize + 4);
+    const view = new DataView(padded.buffer);
+    view.setUint32(0, data.byteLength, true);
+    padded.set(new Uint8Array(data), 4);
+    // Fill padding with random bytes
+    for (let i = data.byteLength + 4; i < padded.length; i++) {
+        padded[i] = Math.floor(Math.random() * 256);
+    }
+    return padded.buffer;
+}
+function unpadPayload(data) {
+    if (!config.paddingEnabled)
+        return data;
+    const view = new DataView(data);
+    const originalSize = view.getUint32(0, true);
+    return data.slice(4, 4 + originalSize);
+}
+function generateRandomTrafficBurst(count = 3) {
+    for (let i = 0; i < count; i++) {
+        setTimeout(() => sendDecoyRequest(), Math.random() * 2000);
+    }
 }
 
 
@@ -477,6 +801,189 @@ function createHiddenProperty(obj, key, value) {
 }
 
 
+/* module: cloak/fingerprint.js */
+/**
+ * Advanced Anti-Fingerprinting Module
+ * Adds noise to canvas, WebGL, audio, and timing fingerprints.
+ * Randomizes navigator properties and screen metrics.
+ */
+let config = { noiseLevel: 0.5, enabled: true };
+function initAntiFingerprint(cfg = {}) {
+    config = { ...config, ...cfg };
+    if (!config.enabled)
+        return;
+    patchCanvas();
+    patchWebGL();
+    patchAudio();
+    patchNavigator();
+    patchScreen();
+    patchTiming();
+}
+function patchCanvas() {
+    const proto = HTMLCanvasElement.prototype;
+    const origGetContext = proto.getContext.bind(proto);
+    proto.getContext = function (contextId, options) {
+        const ctx = origGetContext(contextId, options);
+        if (!ctx)
+            return ctx;
+        if (contextId === '2d' && ctx instanceof CanvasRenderingContext2D) {
+            patchCanvas2D(ctx);
+        }
+        else if ((contextId === 'webgl' || contextId === 'experimental-webgl') && ctx instanceof WebGLRenderingContext) {
+            patchWebGLContext(ctx);
+        }
+        return ctx;
+    };
+}
+function patchCanvas2D(ctx) {
+    const origGetImageData = ctx.getImageData.bind(ctx);
+    ctx.getImageData = function (sx, sy, sw, sh) {
+        const data = origGetImageData(sx, sy, sw, sh);
+        addPixelNoise(data.data);
+        return data;
+    };
+    const origToDataURL = HTMLCanvasElement.prototype.toDataURL.bind(ctx.canvas);
+    const origToBlob = HTMLCanvasElement.prototype.toBlob.bind(ctx.canvas);
+    ctx.canvas.toDataURL = function (type, quality) {
+        const w = ctx.canvas.width;
+        const h = ctx.canvas.height;
+        if (w === 0 || h === 0)
+            return origToDataURL(type, quality);
+        const img = origGetImageData(0, 0, w, h);
+        addPixelNoise(img.data);
+        ctx.putImageData(img, 0, 0);
+        const result = origToDataURL(type, quality);
+        return result;
+    };
+    ctx.canvas.toBlob = function (callback, type, quality) {
+        const w = ctx.canvas.width;
+        const h = ctx.canvas.height;
+        if (w === 0 || h === 0) {
+            origToBlob(callback, type, quality);
+            return;
+        }
+        const img = origGetImageData(0, 0, w, h);
+        addPixelNoise(img.data);
+        ctx.putImageData(img, 0, 0);
+        origToBlob(callback, type, quality);
+    };
+}
+function addPixelNoise(data) {
+    const level = config.noiseLevel || 0.5;
+    for (let i = 0; i < data.length; i += 4) {
+        const noise = (Math.random() - 0.5) * level * 2;
+        data[i] = Math.min(255, Math.max(0, data[i] + noise));
+        data[i + 1] = Math.min(255, Math.max(0, data[i + 1] + noise));
+        data[i + 2] = Math.min(255, Math.max(0, data[i + 2] + noise));
+    }
+}
+function patchWebGL() {
+    // WebGL fingerprinting is done via parameter queries
+    const origGetParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function (pname) {
+        const result = origGetParameter.call(this, pname);
+        // Add tiny noise to float parameters that are commonly fingerprinted
+        if (typeof result === 'number' && pname !== 0x0D31 && pname !== 0x0D33) {
+            return result + (Math.random() - 0.5) * 0.0001;
+        }
+        return result;
+    };
+}
+function patchWebGLContext(gl) {
+    // Additional WebGL context patching if needed
+}
+function patchAudio() {
+    if (!window.AudioContext && !window.webkitAudioContext)
+        return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const origCreateAnalyser = AC.prototype.createAnalyser;
+    AC.prototype.createAnalyser = function () {
+        const analyser = origCreateAnalyser.call(this);
+        const origGetFloatFrequencyData = analyser.getFloatFrequencyData.bind(analyser);
+        analyser.getFloatFrequencyData = function (array) {
+            origGetFloatFrequencyData(array);
+            for (let i = 0; i < array.length; i++) {
+                array[i] += (Math.random() - 0.5) * 0.1;
+            }
+        };
+        return analyser;
+    };
+}
+function patchNavigator() {
+    const props = {
+        hardwareConcurrency: Math.max(2, Math.min(8, navigator.hardwareConcurrency || 4)),
+        deviceMemory: [2, 4, 8][Math.floor(Math.random() * 3)],
+        maxTouchPoints: navigator.maxTouchPoints || 0,
+        platform: navigator.platform,
+    };
+    for (const [key, value] of Object.entries(props)) {
+        try {
+            Object.defineProperty(navigator, key, {
+                get() { return value; },
+                configurable: true,
+            });
+        }
+        catch (e) { }
+    }
+    // Randomize user agent slightly (if possible)
+    const ua = navigator.userAgent;
+    if (ua.includes('Chrome/')) {
+        const version = ua.match(/Chrome\/([\d.]+)/);
+        if (version) {
+            const minor = parseInt(version[1].split('.')[2] || '0', 10);
+            const newMinor = Math.max(0, minor + Math.floor((Math.random() - 0.5) * 4));
+            const newUa = ua.replace(version[1], version[1].replace(/\.\d+$/, `.${newMinor}`));
+            try {
+                Object.defineProperty(navigator, 'userAgent', {
+                    get() { return newUa; },
+                    configurable: true,
+                });
+            }
+            catch (e) { }
+        }
+    }
+}
+function patchScreen() {
+    // Add tiny variation to screen dimensions (some sites fingerprint these)
+    const variations = [0, 0, 0, 0];
+    try {
+        Object.defineProperty(screen, 'availWidth', {
+            get() { return screen.width + variations[0]; },
+            configurable: true,
+        });
+        Object.defineProperty(screen, 'availHeight', {
+            get() { return screen.height + variations[1]; },
+            configurable: true,
+        });
+    }
+    catch (e) { }
+}
+function patchTiming() {
+    // Add jitter to performance.now() to prevent timing-based fingerprinting
+    const origNow = performance.now.bind(performance);
+    let drift = 0;
+    performance.now = function () {
+        const result = origNow() + drift;
+        drift += (Math.random() - 0.5) * 0.05;
+        drift *= 0.95; // slowly decay
+        return result;
+    };
+    // Patch Date.now slightly
+    const origDateNow = Date.now.bind(Date);
+    Date.now = function () {
+        return origDateNow() + Math.floor((Math.random() - 0.5) * 2);
+    };
+}
+function generateNoiseProfile() {
+    return {
+        canvasNoise: Math.random(),
+        webglNoise: Math.random(),
+        audioNoise: Math.random(),
+        timingJitter: Math.random(),
+    };
+}
+
+
 /* module: dom/window.js */
 /**
  * Minimal window.location and history shadowing.
@@ -600,6 +1107,16 @@ function uninstallHooks() {
  */
 let observer = null;
 let baseProxyUrl = '';
+let dynamicPaths = {};
+function setProxyPaths(paths) {
+    dynamicPaths = paths;
+}
+function getProxyPath(key) {
+    const p = dynamicPaths[key];
+    if (p)
+        return '/_midas/' + p;
+    return '/_midas/' + key;
+}
 function startDomPatching(proxyBase) {
     baseProxyUrl = proxyBase.replace(/\/$/, '');
     observer = new MutationObserver((mutations) => {
@@ -695,10 +1212,8 @@ function interceptLink(el) {
         e.preventDefault();
         e.stopPropagation();
         const absUrl = new URL(href, window.location.href).href;
-        // Dispatch navigation event for the app to handle
         const event = new CustomEvent('midas-navigate', { detail: { url: absUrl, replace: false } });
         window.dispatchEvent(event);
-        // Also try to fetch and inject if no handler catches it
         try {
             const resp = await midasFetch(absUrl);
             const html = await resp.text();
@@ -735,15 +1250,11 @@ function interceptForm(el) {
     });
 }
 function injectHtml(html, url) {
-    // Parse and inject HTML content
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
-    // Update document title
     if (doc.title)
         document.title = doc.title;
-    // Replace body content
     document.body.innerHTML = doc.body.innerHTML;
-    // Inject head elements (styles, meta, base)
     const existingHeadElements = Array.from(document.head.querySelectorAll('link[rel="stylesheet"], style, meta, base'));
     for (const el of existingHeadElements) {
         if (!el.getAttribute('data-midas-preserve'))
@@ -751,14 +1262,12 @@ function injectHtml(html, url) {
     }
     for (const el of Array.from(doc.head.children)) {
         if (el.tagName.toLowerCase() === 'script')
-            continue; // Don't inject scripts from head for safety
+            continue;
         const imported = document.importNode(el, true);
         imported.setAttribute('data-midas-injected', '1');
         document.head.appendChild(imported);
     }
-    // Patch all new elements
     patchChildren(document.body);
-    // Execute inline scripts safely
     const scripts = document.body.querySelectorAll('script');
     for (const script of Array.from(scripts)) {
         if (script.src)
@@ -767,9 +1276,7 @@ function injectHtml(html, url) {
         newScript.textContent = script.textContent;
         script.replaceWith(newScript);
     }
-    // Update history
     history.pushState({ midas: true, url }, '', '/?go=' + encodeURIComponent(url));
-    // Update location proxy
     const locEvent = new CustomEvent('midas-location-update', { detail: { url } });
     window.dispatchEvent(locEvent);
 }
@@ -777,7 +1284,7 @@ function proxySubresource(url) {
     if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('javascript:') || url.startsWith('#'))
         return url;
     const abs = new URL(url, window.location.href).href;
-    return `${baseProxyUrl}/_midas/proxy?url=${encodeURIComponent(abs)}`;
+    return `${baseProxyUrl}${getProxyPath('proxy')}?url=${encodeURIComponent(abs)}`;
 }
 function stopDomPatching() {
     if (observer) {
@@ -790,6 +1297,157 @@ function injectStyles(cssText) {
     style.textContent = cssText;
     document.head.appendChild(style);
     return style;
+}
+
+
+/* module: dom/storage.js */
+/**
+ * Storage Isolation Layer
+ * Virtualizes localStorage, sessionStorage, and indexedDB
+ * to provide per-origin isolation within the proxy context.
+ */
+const ORIGIN_KEY_PREFIX = '__midas_storage_';
+class IsolatedStorage {
+    prefix;
+    backend;
+    constructor(origin, backend) {
+        this.prefix = ORIGIN_KEY_PREFIX + btoa(origin).replace(/[^a-zA-Z0-9]/g, '') + '_';
+        this.backend = backend;
+    }
+    get length() {
+        let count = 0;
+        for (let i = 0; i < this.backend.length; i++) {
+            const k = this.backend.key(i);
+            if (k && k.startsWith(this.prefix))
+                count++;
+        }
+        return count;
+    }
+    key(index) {
+        let count = 0;
+        for (let i = 0; i < this.backend.length; i++) {
+            const k = this.backend.key(i);
+            if (k && k.startsWith(this.prefix)) {
+                if (count === index)
+                    return k.slice(this.prefix.length);
+                count++;
+            }
+        }
+        return null;
+    }
+    getItem(key) {
+        return this.backend.getItem(this.prefix + key);
+    }
+    setItem(key, value) {
+        this.backend.setItem(this.prefix + key, value);
+    }
+    removeItem(key) {
+        this.backend.removeItem(this.prefix + key);
+    }
+    clear() {
+        const toRemove = [];
+        for (let i = 0; i < this.backend.length; i++) {
+            const k = this.backend.key(i);
+            if (k && k.startsWith(this.prefix))
+                toRemove.push(k);
+        }
+        for (const k of toRemove)
+            this.backend.removeItem(k);
+    }
+}
+let realLocalStorage = null;
+let realSessionStorage = null;
+let currentOrigin = '';
+let isolatedLocal = null;
+let isolatedSession = null;
+function installStorageHooks(targetOrigin) {
+    currentOrigin = targetOrigin;
+    try {
+        realLocalStorage = window.localStorage;
+        isolatedLocal = new IsolatedStorage(targetOrigin, realLocalStorage);
+        Object.defineProperty(window, 'localStorage', {
+            get() { return isolatedLocal; },
+            configurable: true,
+        });
+    }
+    catch (e) {
+        // Storage access denied (private mode, etc.)
+    }
+    try {
+        realSessionStorage = window.sessionStorage;
+        isolatedSession = new IsolatedStorage(targetOrigin, realSessionStorage);
+        Object.defineProperty(window, 'sessionStorage', {
+            get() { return isolatedSession; },
+            configurable: true,
+        });
+    }
+    catch (e) {
+        // Storage access denied
+    }
+}
+function updateStorageOrigin(newOrigin) {
+    currentOrigin = newOrigin;
+    if (realLocalStorage)
+        isolatedLocal = new IsolatedStorage(newOrigin, realLocalStorage);
+    if (realSessionStorage)
+        isolatedSession = new IsolatedStorage(newOrigin, realSessionStorage);
+}
+function uninstallStorageHooks() {
+    if (realLocalStorage) {
+        Object.defineProperty(window, 'localStorage', {
+            get() { return realLocalStorage; },
+            configurable: true,
+        });
+    }
+    if (realSessionStorage) {
+        Object.defineProperty(window, 'sessionStorage', {
+            get() { return realSessionStorage; },
+            configurable: true,
+        });
+    }
+}
+/**
+ * IndexedDB Isolation
+ * Wraps IDBFactory to prefix database names per origin.
+ */
+let realIndexedDB = null;
+function installIndexedDBHook(targetOrigin) {
+    const prefix = ORIGIN_KEY_PREFIX + btoa(targetOrigin).replace(/[^a-zA-Z0-9]/g, '') + '_';
+    try {
+        realIndexedDB = window.indexedDB;
+        const wrapped = {
+            open(name, version) {
+                return realIndexedDB.open(prefix + name, version);
+            },
+            deleteDatabase(name) {
+                return realIndexedDB.deleteDatabase(prefix + name);
+            },
+            cmp(a, b) {
+                return realIndexedDB.cmp(a, b);
+            },
+            databases() {
+                return realIndexedDB.databases().then(list => list.filter(d => d.name && d.name.startsWith(prefix)).map(d => ({
+                    ...d,
+                    name: d.name.slice(prefix.length),
+                })));
+            },
+        };
+        Object.defineProperty(window, 'indexedDB', {
+            get() { return wrapped; },
+            configurable: true,
+        });
+    }
+    catch (e) {
+        // IDB not available
+    }
+}
+function uninstallIndexedDBHook() {
+    if (realIndexedDB) {
+        Object.defineProperty(window, 'indexedDB', {
+            get() { return realIndexedDB; },
+            configurable: true,
+        });
+    }
 }
 
 
@@ -866,17 +1524,173 @@ function installCaptchaHooks(proxyBase) {
 }
 
 
+/* module: sandbox/iframe.js */
+/**
+ * Iframe Sandbox Engine
+ * Provides complete page isolation via sandboxed iframes.
+ * Enables two-way proxy communication between parent and sandbox.
+ */
+let activeSandbox = null;
+let messageHandler = null;
+function createSandbox(cfg) {
+    destroySandbox();
+    const iframe = document.createElement('iframe');
+    iframe.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:999999;';
+    iframe.sandbox = 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads';
+    iframe.referrerPolicy = 'no-referrer';
+    // Build a bootstrap HTML that loads our proxy inside the iframe
+    const bootstrapHtml = buildBootstrapHtml(cfg);
+    const blob = new Blob([bootstrapHtml], { type: 'text/html' });
+    iframe.src = URL.createObjectURL(blob);
+    document.body.appendChild(iframe);
+    activeSandbox = iframe;
+    // Listen for messages from the sandbox
+    messageHandler = (e) => {
+        if (e.source !== iframe.contentWindow)
+            return;
+        handleSandboxMessage(e.data, cfg);
+    };
+    window.addEventListener('message', messageHandler);
+    return iframe;
+}
+function destroySandbox() {
+    if (messageHandler) {
+        window.removeEventListener('message', messageHandler);
+        messageHandler = null;
+    }
+    if (activeSandbox) {
+        activeSandbox.remove();
+        activeSandbox = null;
+    }
+}
+function buildBootstrapHtml(cfg) {
+    const proxyBase = cfg.proxyBase;
+    const targetUrl = cfg.targetUrl;
+    return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<base href="${escapeHtml(targetUrl)}">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:auto; }
+</style>
+<script>
+(function(){
+  const PROXY_BASE = '${proxyBase}';
+  const TARGET_URL = '${targetUrl}';
+
+  // Notify parent we're ready
+  parent.postMessage({ type: 'sandbox-ready', url: TARGET_URL }, '*');
+
+  // Proxy all fetches through parent
+  const origFetch = window.fetch;
+  window.fetch = function(input, init) {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (url.startsWith(PROXY_BASE) || url.startsWith('blob:') || url.startsWith('data:')) {
+      return origFetch(input, init);
+    }
+    return origFetch(PROXY_BASE + '/_midas/proxy?url=' + encodeURIComponent(url), init);
+  };
+
+  // Proxy XMLHttpRequest
+  const OrigXHR = window.XMLHttpRequest;
+  function ProxyXHR() {
+    const xhr = new OrigXHR();
+    const origOpen = xhr.open.bind(xhr);
+    xhr.open = function(method, url, async, user, password) {
+      if (typeof url === 'string' && !url.startsWith(PROXY_BASE) && !url.startsWith('data:')) {
+        url = PROXY_BASE + '/_midas/proxy?url=' + encodeURIComponent(url);
+      }
+      return origOpen(method, url, async, user, password);
+    };
+    return xhr;
+  }
+  ProxyXHR.prototype = OrigXHR.prototype;
+  window.XMLHttpRequest = ProxyXHR;
+
+  // Notify parent on navigation attempts
+  window.addEventListener('click', function(e) {
+    const a = e.target.closest('a');
+    if (a && a.href && !a.href.startsWith('#') && !a.href.startsWith('javascript:')) {
+      e.preventDefault();
+      parent.postMessage({ type: 'sandbox-navigate', url: a.href }, '*');
+    }
+  });
+
+  // Notify parent on form submissions
+  window.addEventListener('submit', function(e) {
+    const form = e.target.closest('form');
+    if (form) {
+      e.preventDefault();
+      parent.postMessage({ type: 'sandbox-form', action: form.action, method: form.method }, '*');
+    }
+  });
+
+  // Load target content
+  fetch(PROXY_BASE + '/_midas/browse?url=' + encodeURIComponent(TARGET_URL))
+    .then(r => r.text())
+    .then(html => { document.open(); document.write(html); document.close(); })
+    .catch(e => { document.body.innerHTML = '<h1>Failed to load</h1>'; });
+})();
+</script>
+</head>
+<body></body>
+</html>`;
+}
+function handleSandboxMessage(data, cfg) {
+    if (!data || typeof data !== 'object')
+        return;
+    switch (data.type) {
+        case 'sandbox-ready':
+            if (cfg.onNavigate)
+                cfg.onNavigate(data.url);
+            break;
+        case 'sandbox-navigate':
+            if (cfg.onNavigate)
+                cfg.onNavigate(data.url);
+            break;
+        case 'sandbox-form':
+            // Form submission handling could be added here
+            break;
+    }
+}
+function escapeHtml(str) {
+    return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '<')
+        .replace(/>/g, '>')
+        .replace(/"/g, '"')
+        .replace(/'/g, '&#39;');
+}
+function isSandboxActive() {
+    return !!activeSandbox;
+}
+function getSandboxFrame() {
+    return activeSandbox;
+}
+
+
 /* bootstrap */
 window.__midasInit = async function(cfg) {
   initDetection();
   initSession();
+  initAntiFingerprint();
+  initNoise();
+  installWebSocketHook();
 
   const sidRes = await fetch(cfg.baseUrl + '/_midas/session', { method: 'POST' });
   const sidData = await sidRes.json();
 
+  // Use polymorphic paths from server if available
+  const paths = sidData.paths || {};
+
   await initTransport({ baseUrl: cfg.baseUrl, sessionId: sidData.sid });
   installLocationHook(cfg.baseUrl, window.location.href);
   installHistoryHook();
+  installStorageHooks(window.location.href);
+  installIndexedDBHook(window.location.href);
   startDomPatching(cfg.baseUrl);
   installCaptchaHooks(cfg.baseUrl);
 
@@ -887,7 +1701,6 @@ window.__midasInit = async function(cfg) {
     try {
       const resp = await midasFetch(goUrl);
       const html = await resp.text();
-      // Use the global injectHtml from patch module
       if (typeof injectHtml === 'function') {
         injectHtml(html, goUrl);
       }

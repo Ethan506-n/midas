@@ -51,7 +51,10 @@ function handler(req, res) {
     return;
   }
 
-  if (url.pathname === '/sw.js' || url.pathname === '/loader.js' || url.pathname === '/midas.client.js' || url.pathname === '/manifest.json') {
+  // Serve any static file from public directory
+  const staticFiles = ['/sw.js', '/loader.js', '/midas.client.js', '/manifest.json', '/demo.html', '/index.html'];
+  const isStatic = staticFiles.includes(url.pathname) || url.pathname.match(/\.(js|html|css|json|wasm|png|jpg|svg|ico)$/);
+  if (isStatic) {
     serveStatic(req, res, url.pathname);
     return;
   }

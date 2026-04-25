@@ -4,6 +4,16 @@
  */
 let observer = null;
 let baseProxyUrl = '';
+let dynamicPaths = {};
+export function setProxyPaths(paths) {
+    dynamicPaths = paths;
+}
+function getProxyPath(key) {
+    const p = dynamicPaths[key];
+    if (p)
+        return '/_midas/' + p;
+    return '/_midas/' + key;
+}
 export function startDomPatching(proxyBase) {
     baseProxyUrl = proxyBase.replace(/\/$/, '');
     observer = new MutationObserver((mutations) => {
@@ -99,10 +109,8 @@ function interceptLink(el) {
         e.preventDefault();
         e.stopPropagation();
         const absUrl = new URL(href, window.location.href).href;
-        // Dispatch navigation event for the app to handle
         const event = new CustomEvent('midas-navigate', { detail: { url: absUrl, replace: false } });
         window.dispatchEvent(event);
-        // Also try to fetch and inject if no handler catches it
         try {
             const resp = await midasFetch(absUrl);
             const html = await resp.text();
@@ -138,16 +146,12 @@ function interceptForm(el) {
         }
     });
 }
-function injectHtml(html, url) {
-    // Parse and inject HTML content
+export function injectHtml(html, url) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
-    // Update document title
     if (doc.title)
         document.title = doc.title;
-    // Replace body content
     document.body.innerHTML = doc.body.innerHTML;
-    // Inject head elements (styles, meta, base)
     const existingHeadElements = Array.from(document.head.querySelectorAll('link[rel="stylesheet"], style, meta, base'));
     for (const el of existingHeadElements) {
         if (!el.getAttribute('data-midas-preserve'))
@@ -155,14 +159,12 @@ function injectHtml(html, url) {
     }
     for (const el of Array.from(doc.head.children)) {
         if (el.tagName.toLowerCase() === 'script')
-            continue; // Don't inject scripts from head for safety
+            continue;
         const imported = document.importNode(el, true);
         imported.setAttribute('data-midas-injected', '1');
         document.head.appendChild(imported);
     }
-    // Patch all new elements
     patchChildren(document.body);
-    // Execute inline scripts safely
     const scripts = document.body.querySelectorAll('script');
     for (const script of Array.from(scripts)) {
         if (script.src)
@@ -171,9 +173,7 @@ function injectHtml(html, url) {
         newScript.textContent = script.textContent;
         script.replaceWith(newScript);
     }
-    // Update history
     history.pushState({ midas: true, url }, '', '/?go=' + encodeURIComponent(url));
-    // Update location proxy
     const locEvent = new CustomEvent('midas-location-update', { detail: { url } });
     window.dispatchEvent(locEvent);
 }
@@ -181,7 +181,7 @@ function proxySubresource(url) {
     if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('javascript:') || url.startsWith('#'))
         return url;
     const abs = new URL(url, window.location.href).href;
-    return `${baseProxyUrl}/_midas/proxy?url=${encodeURIComponent(abs)}`;
+    return `${baseProxyUrl}${getProxyPath('proxy')}?url=${encodeURIComponent(abs)}`;
 }
 export function stopDomPatching() {
     if (observer) {

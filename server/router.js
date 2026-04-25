@@ -2,9 +2,19 @@ import http from 'http';
 import https from 'https';
 import zlib from 'zlib';
 import { URL } from 'url';
+import { getEndpointPaths, matchPolymorphicPath } from './polymorph-router.js';
+import { wsBridgeHandler } from './ws-bridge.js';
 
 const ACTIVE_TRANSPORTS = new Map();
 const COOKIE_JAR = new Map();
+
+// Current polymorphic paths (rotates every 5 min)
+let currentPaths = getEndpointPaths();
+
+function refreshPaths() {
+  currentPaths = getEndpointPaths();
+}
+setInterval(refreshPaths, 60000);
 
 function generateSessionId() {
   return Array.from({ length: 24 }, () =>
@@ -75,18 +85,21 @@ async function proxyRequest(req, res, targetUrl, passthrough = false) {
   });
 }
 
-const PROXY_PREFIX = '/_midas/browse';
+// Dynamic proxy prefix based on current paths
+function getBrowsePrefix() {
+  return '/_midas/' + currentPaths.browse;
+}
 
 function toProxyUrl(target) {
-  return PROXY_PREFIX + '?url=' + encodeURIComponent(target);
+  return '/_midas/' + currentPaths.browse + '?url=' + encodeURIComponent(target);
 }
 
 function htmlDecode(s) {
   return s
     .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
+    .replace(/</g, '<')
+    .replace(/>/g, '>')
+    .replace(/"/g, '"')
     .replace(/&#0?39;/g, "'")
     .replace(/&#x27;/gi, "'")
     .replace(/&nbsp;/g, ' ');
@@ -97,13 +110,13 @@ function resolveUrl(base, ref) {
 }
 
 function isAlreadyProxied(v) {
-  return v.startsWith(PROXY_PREFIX) || v.startsWith('/_midas/');
+  return v.includes('/_midas/') || v.startsWith('/_midas/');
 }
 
 function extractOriginalFromProxy(u) {
   try {
     const parsed = new URL(u, 'http://x');
-    if (!parsed.pathname.startsWith(PROXY_PREFIX)) return null;
+    if (!parsed.pathname.includes('/_midas/')) return null;
     return parsed.searchParams.get('url');
   } catch { return null; }
 }
@@ -174,6 +187,11 @@ function rewriteHtml(html, baseUrl) {
     const abs = resolveUrl(baseUrl, v);
     if (!abs) return m;
     return `url("${toProxyUrl(abs)}")`;
+  });
+
+  // Inject anti-detection script into <head> of every HTML page
+  html = html.replace(/<head\b[^>]*>/i, (m) => {
+    return m + '\n<script data-midas-shim>/* midas-shim */</script>\n';
   });
 
   return html;
@@ -287,7 +305,6 @@ function browseHandler(req, res, targetUrl, depth = 0) {
     res.writeHead(400, { 'content-type': 'text/plain' }); res.end('unsupported protocol'); return;
   }
 
-  // merge any extra query params (e.g. from a GET form on a proxied page) into the real target
   const reqUrl = new URL(req.url, 'http://x');
   for (const [k, v] of reqUrl.searchParams) {
     if (k === 'url') continue;
@@ -297,7 +314,6 @@ function browseHandler(req, res, targetUrl, depth = 0) {
   const isHttps = url.protocol === 'https:';
   const lib = isHttps ? https : http;
 
-  // build outgoing headers
   const headers = {};
   headers['user-agent'] = req.headers['user-agent'] || 'Mozilla/5.0 (compatible; midas-proxy/0.1)';
   headers['accept'] = req.headers['accept'] || 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8';
@@ -305,11 +321,9 @@ function browseHandler(req, res, targetUrl, depth = 0) {
   headers['accept-encoding'] = 'gzip, deflate, br';
   if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
 
-  // referer rewriting
   const refOriginal = extractOriginalFromProxy(req.headers.referer || '');
   if (refOriginal) headers['referer'] = refOriginal;
 
-  // cookie jar -> outgoing Cookie
   const cookieHeader = buildCookieHeader(jar, url.hostname, url.pathname, isHttps);
   if (cookieHeader) headers['cookie'] = cookieHeader;
 
@@ -323,7 +337,6 @@ function browseHandler(req, res, targetUrl, depth = 0) {
   };
 
   const proxyReq = lib.request(options, (proxyRes) => {
-    // store any Set-Cookie regardless of redirect
     storeCookies(jar, url.hostname, proxyRes.headers['set-cookie']);
 
     if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location && depth < 8) {
@@ -352,7 +365,6 @@ function browseHandler(req, res, targetUrl, depth = 0) {
     delete outHeaders['alt-svc'];
     outHeaders['cache-control'] = 'no-store';
 
-    // decompression
     const enc = (proxyRes.headers['content-encoding'] || '').toLowerCase();
     let stream = proxyRes;
     if (enc === 'gzip') stream = proxyRes.pipe(zlib.createGunzip());
@@ -402,24 +414,62 @@ export function router(req, res, url) {
   }
 
   const pathname = url.pathname;
+  const pathType = matchPolymorphicPath(pathname, currentPaths);
 
-  if (pathname === '/_midas/browse') {
+  // Legacy fixed session endpoint for client discovery
+  if (pathname === '/_midas/session') {
+    const sid = generateSessionId();
+    const transport = url.searchParams.get('t') || 'chunked';
+    ACTIVE_TRANSPORTS.set(sid, { transport, created: Date.now() });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      sid,
+      transport,
+      nonce: Math.random().toString(36).slice(2),
+      paths: currentPaths,
+    }));
+    return;
+  }
+
+  // Noise endpoint - returns random data to confuse traffic analysis
+  if (pathType === 'noise') {
+    const size = 100 + Math.floor(Math.random() * 900);
+    const noise = Buffer.alloc(size);
+    for (let i = 0; i < size; i++) noise[i] = Math.floor(Math.random() * 256);
+    res.writeHead(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': size,
+      'cache-control': 'no-store',
+    });
+    res.end(noise);
+    return;
+  }
+
+  // Browse endpoint
+  if (pathType === 'browse') {
     const target = url.searchParams.get('url');
     if (!target) { res.writeHead(400); res.end('missing url'); return; }
     browseHandler(req, res, target);
     return;
   }
 
-  if (pathname === '/_midas/session') {
+  // Session endpoint
+  if (pathType === 'session') {
     const sid = generateSessionId();
     const transport = url.searchParams.get('t') || 'chunked';
     ACTIVE_TRANSPORTS.set(sid, { transport, created: Date.now() });
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ sid, transport, nonce: Math.random().toString(36).slice(2) }));
+    res.end(JSON.stringify({
+      sid,
+      transport,
+      nonce: Math.random().toString(36).slice(2),
+      paths: currentPaths,
+    }));
     return;
   }
 
-  if (pathname === '/_midas/stream') {
+  // Stream endpoint
+  if (pathType === 'stream') {
     const sid = url.searchParams.get('sid');
     if (!sid || !ACTIVE_TRANSPORTS.has(sid)) {
       res.writeHead(400); res.end(); return;
@@ -438,8 +488,8 @@ export function router(req, res, url) {
     return;
   }
 
-  // GET proxy for subresources (images, css, scripts, etc.)
-  if (pathname === '/_midas/proxy') {
+  // GET proxy for subresources
+  if (pathType === 'proxy') {
     const target = url.searchParams.get('url');
     if (!target) { res.writeHead(400); res.end(); return; }
     proxyRequest(req, res, target).catch(() => {
@@ -448,7 +498,8 @@ export function router(req, res, url) {
     return;
   }
 
-  if (pathname === '/_midas/fetch') {
+  // Fetch endpoint
+  if (pathType === 'fetch') {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', async () => {
@@ -506,7 +557,8 @@ export function router(req, res, url) {
     return;
   }
 
-  if (pathname === '/_midas/chunk') {
+  // Chunk endpoint
+  if (pathType === 'chunk') {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', async () => {
@@ -546,7 +598,8 @@ export function router(req, res, url) {
     return;
   }
 
-  if (pathname === '/_midas/passthrough') {
+  // Passthrough endpoint
+  if (pathType === 'passthrough') {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', async () => {
@@ -560,6 +613,56 @@ export function router(req, res, url) {
     return;
   }
 
+  // WebSocket bridge endpoint
+  if (pathType === 'wsBridge') {
+    wsBridgeHandler(req, res, url);
+    return;
+  }
+
+  // Legacy fallback for static _midas paths (backward compat)
+  if (pathname.startsWith('/_midas/')) {
+    const legacyPath = pathname.replace('/_midas/', '');
+    if (legacyPath.startsWith('browse')) {
+      const target = url.searchParams.get('url');
+      if (target) { browseHandler(req, res, target); return; }
+    }
+    if (legacyPath.startsWith('proxy')) {
+      const target = url.searchParams.get('url');
+      if (target) { proxyRequest(req, res, target).catch(() => {}); return; }
+    }
+    if (legacyPath.startsWith('fetch')) {
+      // Quick legacy fetch handler
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const data = JSON.parse(body);
+          const targetUrl = new URL(data.url);
+          const lib = targetUrl.protocol === 'https:' ? https : http;
+          const proxyReq = lib.request({
+            hostname: targetUrl.hostname,
+            port: targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80),
+            path: targetUrl.pathname + targetUrl.search,
+            method: data.method || 'GET',
+            headers: data.headers || {},
+            rejectUnauthorized: false,
+          }, (proxyRes) => {
+            let rb = '';
+            proxyRes.setEncoding('utf8');
+            proxyRes.on('data', c => rb += c);
+            proxyRes.on('end', () => {
+              res.writeHead(200, { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ status: proxyRes.statusCode, headers: proxyRes.headers, body: rb }));
+            });
+          });
+          proxyReq.end();
+        } catch (e) { res.writeHead(400); res.end(); }
+      });
+      return;
+    }
+  }
+
   res.writeHead(404); res.end();
 }
+
 

@@ -1,5 +1,5 @@
 /**
- * Transport layer with multiple strategies.
+ * Transport layer with multiple strategies and polymorphic path support.
  * Prioritizes SSE and chunked fetch to avoid WebSocket tunnel signatures.
  */
 
@@ -24,6 +24,19 @@ interface MidasResponse {
   body: ArrayBuffer;
 }
 
+// Dynamic paths from server session response
+let dynamicPaths: Record<string, string> = {};
+
+export function setDynamicPaths(paths: Record<string, string>): void {
+  dynamicPaths = paths;
+}
+
+function endpoint(pathKey: string): string {
+  const p = dynamicPaths[pathKey];
+  if (p) return '/_midas/' + p;
+  return '/_midas/' + pathKey;
+}
+
 let currentTransport: BaseTransport | null = null;
 
 abstract class BaseTransport {
@@ -38,8 +51,8 @@ abstract class BaseTransport {
   abstract fetch(req: MidasRequest): Promise<MidasResponse>;
   abstract supportsStreaming(): boolean;
 
-  protected endpoint(path: string): string {
-    return `${this.baseUrl}${path}`;
+  protected buildUrl(pathKey: string): string {
+    return `${this.baseUrl}${endpoint(pathKey)}`;
   }
 }
 
@@ -53,7 +66,7 @@ class ChunkedTransport extends BaseTransport {
       sid: this.sessionId,
     });
 
-    const resp = await fetch(this.endpoint('/_midas/chunk'), {
+    const resp = await fetch(this.buildUrl('chunk'), {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -98,7 +111,7 @@ class SseTransport extends BaseTransport {
       sid: this.sessionId,
     });
 
-    const resp = await fetch(this.endpoint('/_midas/fetch'), {
+    const resp = await fetch(this.buildUrl('fetch'), {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -132,7 +145,7 @@ class SimpleFetchTransport extends BaseTransport {
       passthrough: false,
     });
 
-    const resp = await fetch(this.endpoint('/_midas/fetch'), {
+    const resp = await fetch(this.buildUrl('fetch'), {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -159,7 +172,7 @@ export async function initTransport(cfg: TransportConfig): Promise<BaseTransport
   let type = cfg.preferred || 'chunked';
 
   try {
-    const test = await fetch(`${cfg.baseUrl}/_midas/session?t=${type}`, { method: 'HEAD' });
+    const test = await fetch(`${cfg.baseUrl}${endpoint('session')}?t=${type}`, { method: 'HEAD' });
     if (!test.ok) type = 'fetch';
   } catch (e) {
     type = 'fetch';
@@ -198,4 +211,5 @@ export async function midasFetch(url: string, init?: RequestInit): Promise<Respo
     headers: resp.headers,
   });
 }
+
 

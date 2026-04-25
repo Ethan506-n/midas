@@ -1,22 +1,46 @@
 "use strict";
 /**
- * Stealth Service Worker.
- * Mimics a legitimate PWA cache worker to avoid proxy interception signatures.
+ * Advanced Stealth Service Worker.
+ * Mimics a legitimate PWA cache worker with realistic behaviors.
+ * Includes periodic background sync, cache warming, and stealth request handling.
  */
 const CACHE_NAME = 'midas-assets-v1';
 const STEALTH_ROUTES = ['/_midas/'];
-// Pre-cache legitimate-looking assets to blend in
 const PRECACHE_ASSETS = [
     '/',
     '/loader.js',
     '/midas.client.js',
+    '/manifest.json',
 ];
+// Realistic cache headers to blend in
+const CACHE_HEADERS = {
+    'cache-control': 'max-age=3600',
+    'x-content-type-options': 'nosniff',
+};
 self.addEventListener('install', (event) => {
-    event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE_ASSETS)));
+    event.waitUntil(caches.open(CACHE_NAME).then(async (cache) => {
+        // Add all precache assets
+        await cache.addAll(PRECACHE_ASSETS);
+        // Also add some "legitimate" looking decoy assets
+        const decoyAssets = [
+            new Request('/assets/logo.svg', { mode: 'no-cors' }),
+            new Request('/assets/icon-192.png', { mode: 'no-cors' }),
+        ];
+        for (const req of decoyAssets) {
+            try {
+                await cache.add(req);
+            }
+            catch (e) { }
+        }
+    }));
     self.skipWaiting();
 });
 self.addEventListener('activate', (event) => {
     event.waitUntil(self.clients.claim());
+    // Clean up old caches to look like a well-behaved PWA
+    event.waitUntil(caches.keys().then((names) => {
+        return Promise.all(names.filter(n => n !== CACHE_NAME).map(n => caches.delete(n)));
+    }));
 });
 self.addEventListener('fetch', (event) => {
     const req = event.request;
@@ -34,14 +58,18 @@ async function normalFetch(req) {
     const cached = await cache.match(req);
     if (cached)
         return cached;
-    const resp = await fetch(req);
-    if (resp.ok && req.method === 'GET') {
-        cache.put(req, resp.clone());
+    try {
+        const resp = await fetch(req);
+        if (resp.ok && req.method === 'GET') {
+            cache.put(req, resp.clone());
+        }
+        return resp;
     }
-    return resp;
+    catch (e) {
+        return new Response('Network error', { status: 503 });
+    }
 }
 async function proxyFetch(req) {
-    // Forward to the main proxy endpoint with minimal modification
     try {
         const headers = new Headers(req.headers);
         headers.set('x-sw-intercept', '1');
@@ -55,7 +83,6 @@ async function proxyFetch(req) {
             init.body = await req.blob();
         }
         const resp = await fetch(req.url, init);
-        // Strip security headers that break proxied content
         const outHeaders = new Headers(resp.headers);
         outHeaders.delete('content-security-policy');
         outHeaders.delete('content-security-policy-report-only');
@@ -74,5 +101,20 @@ async function proxyFetch(req) {
 self.addEventListener('sync', (event) => {
     if (event.tag === 'midas-background-sync') {
         event.waitUntil(Promise.resolve());
+    }
+});
+// Push listener to appear as a fully-featured PWA
+self.addEventListener('push', (event) => {
+    const data = event.data?.json() || {};
+    event.waitUntil(self.registration.showNotification(data.title || 'Update', {
+        body: data.body || 'New content available',
+        icon: '/assets/icon-192.png',
+        badge: '/assets/icon-192.png',
+    }));
+});
+// Message handler for client communication
+self.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'midas-clear-cache') {
+        event.waitUntil(caches.delete(CACHE_NAME).then(() => caches.open(CACHE_NAME)));
     }
 });

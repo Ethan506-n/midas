@@ -4,16 +4,13 @@ import zlib from 'zlib';
 import { URL } from 'url';
 import { getEndpointPaths, matchPolymorphicPath } from './polymorph-router.js';
 import { wsBridgeHandler } from './ws-bridge.js';
+import { isCaptchaUrl, buildPassthroughHeaders } from './captcha-handler.js';
 
 const ACTIVE_TRANSPORTS = new Map();
 const COOKIE_JAR = new Map();
 
-// Current polymorphic paths (rotates every 5 min)
 let currentPaths = getEndpointPaths();
-
-function refreshPaths() {
-  currentPaths = getEndpointPaths();
-}
+function refreshPaths() { currentPaths = getEndpointPaths(); }
 setInterval(refreshPaths, 60000);
 
 function generateSessionId() {
@@ -26,68 +23,9 @@ function generateSessionId() {
 
 function setCors(res) {
   res.setHeader('access-control-allow-origin', '*');
-  res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS, PUT, DELETE, PATCH');
+  res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS, PUT, DELETE, PATCH, HEAD');
   res.setHeader('access-control-allow-headers', '*');
   res.setHeader('access-control-max-age', '86400');
-}
-
-async function proxyRequest(req, res, targetUrl, passthrough = false) {
-  const url = new URL(targetUrl);
-  const lib = url.protocol === 'https:' ? https : http;
-
-  const headers = { ...req.headers };
-  delete headers['host'];
-  delete headers['connection'];
-  delete headers['upgrade'];
-  delete headers['http2-settings'];
-
-  if (passthrough) {
-    headers['x-midas-passthrough'] = '1';
-  }
-
-  const options = {
-    hostname: url.hostname,
-    port: url.port || (url.protocol === 'https:' ? 443 : 80),
-    path: url.pathname + url.search,
-    method: req.method,
-    headers,
-    rejectUnauthorized: false,
-  };
-
-  return new Promise((resolve, reject) => {
-    const proxyReq = lib.request(options, (proxyRes) => {
-      const status = proxyRes.statusCode;
-      const outHeaders = { ...proxyRes.headers };
-
-      delete outHeaders['content-security-policy'];
-      delete outHeaders['content-security-policy-report-only'];
-      delete outHeaders['strict-transport-security'];
-      delete outHeaders['x-frame-options'];
-
-      if (passthrough) {
-        outHeaders['access-control-allow-origin'] = '*';
-      }
-
-      res.writeHead(status, outHeaders);
-      proxyRes.pipe(res);
-      proxyRes.on('end', resolve);
-    });
-
-    proxyReq.on('error', (err) => {
-      if (!res.headersSent) {
-        res.writeHead(502, { 'content-type': 'text/plain' });
-        res.end('Proxy error');
-      }
-      reject(err);
-    });
-
-    req.pipe(proxyReq);
-  });
-}
-
-// Dynamic proxy prefix based on current paths
-function getBrowsePrefix() {
-  return '/_midas/' + currentPaths.browse;
 }
 
 function toProxyUrl(target) {
@@ -110,7 +48,7 @@ function resolveUrl(base, ref) {
 }
 
 function isAlreadyProxied(v) {
-  return v.includes('/_midas/') || v.startsWith('/_midas/');
+  return typeof v === 'string' && (v.includes('/_midas/') || v.startsWith('/_midas/'));
 }
 
 function extractOriginalFromProxy(u) {
@@ -124,22 +62,59 @@ function extractOriginalFromProxy(u) {
 function rewriteCss(css, baseUrl) {
   css = css.replace(/url\(\s*("([^"]*)"|'([^']*)'|([^)]*))\)/gi, (m, _all, dq, sq, uq) => {
     const v = (dq ?? sq ?? uq ?? '').trim();
-    if (!v || /^(data:|blob:|about:)/i.test(v) || isAlreadyProxied(v)) return m;
+    if (!v || /^(data:|blob:|about:|#)/i.test(v) || isAlreadyProxied(v)) return m;
     const abs = resolveUrl(baseUrl, v);
     if (!abs) return m;
-    return `url("${toProxyUrl(abs)}")`;
+    return 'url("' + toProxyUrl(abs) + '")';
   });
   css = css.replace(/@import\s+(?:url\()?\s*("([^"]*)"|'([^']*)')\s*\)?/gi, (m, _all, dq, sq) => {
     const v = dq ?? sq ?? '';
     if (isAlreadyProxied(v)) return m;
     const abs = resolveUrl(baseUrl, v);
     if (!abs) return m;
-    return `@import url("${toProxyUrl(abs)}")`;
+    return '@import url("' + toProxyUrl(abs) + '")';
   });
   return css;
 }
 
-function rewriteHtml(html, baseUrl) {
+function getStealthScript(baseProxyUrl) {
+  const nonce = Math.random().toString(36).slice(2, 10);
+  return '<script data-midas="' + nonce + '">' +
+'(function(){' +
+'var base="' + baseProxyUrl + '";' +
+'function px(u){' +
+'if(!u||typeof u!=="string")return u;' +
+'if(u.indexOf("/_midas/")>=0)return u;' +
+'if(/^#|^(javascript|data|blob|mailto|tel|about|ws|wss):/i.test(u))return u;' +
+'try{var a=document.createElement("a");a.href=u;return base+"?url="+encodeURIComponent(a.href);}catch(e){return u;}' +
+'}' +
+'function patch(el){' +
+'if(!el||el.nodeType!==1)return;' +
+'var t=el.tagName;if(!t)return;' +
+'var tag=t.toLowerCase();' +
+'if(tag==="a"){var h=el.getAttribute("href");if(h&&h[0]!=="#")el.setAttribute("href",px(h));}' +
+'else if(tag==="form"){var a=el.getAttribute("action");if(a)el.setAttribute("action",px(a));}' +
+'else if(tag==="img"||tag==="source"||tag==="track"){var s=el.getAttribute("src");if(s)el.setAttribute("src",px(s));var ss=el.getAttribute("srcset");if(ss)el.setAttribute("srcset",ss.split(",").map(function(p){var x=p.trim().split(/\\s+/);x[0]=px(x[0]);return x.join(" ");}).join(", "));}' +
+'else if(tag==="link"){var h=el.getAttribute("href");if(h)el.setAttribute("href",px(h));}' +
+'else if(tag==="script"){var s=el.getAttribute("src");if(s)el.setAttribute("src",px(s));}' +
+'else if(tag==="iframe"||tag==="embed"||tag==="object"){var s=el.getAttribute("src")||el.getAttribute("data");if(s){var r=px(s);if(el.hasAttribute("src"))el.setAttribute("src",r);if(el.hasAttribute("data"))el.setAttribute("data",r);}}' +
+'else if(tag==="meta"){var c=el.getAttribute("content");if(c&&/url\\s*=/i.test(c)){var m=c.match(/(.*url\\s*=\\s*)(.+?)(\\s*;.*|$)/i);if(m)el.setAttribute("content",m[1]+px(m[2])+m[3]);}}' +
+'else if(tag==="video"||tag==="audio"){var s=el.getAttribute("src");if(s)el.setAttribute("src",px(s));var ps=el.querySelectorAll("source");for(var i=0;i<ps.length;i++)patch(ps[i]);}' +
+'}' +
+'function patchAll(root){if(!root)return;var els=root.querySelectorAll?root.querySelectorAll("a,form,img,source,track,link,script,iframe,embed,object,meta,video,audio"):[];for(var i=0;i<els.length;i++)patch(els[i]);}' +
+'var obs=new MutationObserver(function(ms){for(var i=0;i<ms.length;i++){var ml=ms[i].addedNodes;for(var j=0;j<ml.length;j++){var n=ml[j];if(n.nodeType===1){patch(n);patchAll(n);}}}});' +
+'if(document.documentElement){obs.observe(document.documentElement,{childList:true,subtree:true});patchAll(document.body||document.documentElement);}else{document.addEventListener("DOMContentLoaded",function(){obs.observe(document.documentElement,{childList:true,subtree:true});patchAll(document.body);});}' +
+'document.addEventListener("click",function(e){var t=e.target;while(t&&t.tagName!=="A")t=t.parentNode;if(!t)return;var h=t.getAttribute("href");if(!h||h[0]==="#"||/^(javascript|data|mailto|tel):/i.test(h))return;var p=px(h);if(p!==h)t.setAttribute("href",p);if(t.getAttribute("target")==="_blank")return;e.preventDefault();window.location.href=p;},true);' +
+'var origOpen=window.open;' +
+'window.open=function(url,target,features){' +
+'if(url&&typeof url==="string"&&!url.includes("/_midas/")){url=px(url);}' +
+'return origOpen.call(this,url,target,features);' +
+'};' +
+'})();' +
+'</script>';
+}
+
+function rewriteHtml(html, baseUrl, baseProxyUrl) {
   html = html.replace(/<base\b[^>]*>/gi, '');
 
   html = html.replace(/(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi,
@@ -163,7 +138,7 @@ function rewriteHtml(html, baseUrl) {
       if (isAlreadyProxied(v)) return m;
       const abs = resolveUrl(baseUrl, v);
       if (!abs) return m;
-      return `${attr}="${toProxyUrl(abs)}"`;
+      return attr + '="' + toProxyUrl(abs) + '"';
     }
   );
 
@@ -178,7 +153,7 @@ function rewriteHtml(html, baseUrl) {
       seg[0] = toProxyUrl(abs);
       return seg.join(' ');
     });
-    return `srcset="${parts.join(', ')}"`;
+    return 'srcset="' + parts.join(', ') + '"';
   });
 
   html = html.replace(/url\(\s*("([^"]*)"|'([^']*)'|([^)]*))\)/gi, (m, _all, dq, sq, uq) => {
@@ -186,10 +161,31 @@ function rewriteHtml(html, baseUrl) {
     if (!v || /^(data:|blob:|about:)/i.test(v) || isAlreadyProxied(v)) return m;
     const abs = resolveUrl(baseUrl, v);
     if (!abs) return m;
-    return `url("${toProxyUrl(abs)}")`;
+    return 'url("' + toProxyUrl(abs) + '")';
   });
 
+  const stealthScript = getStealthScript(baseProxyUrl);
+  if (html.includes('</head>')) {
+    html = html.replace('</head>', stealthScript + '</head>');
+  } else if (html.includes('</body>')) {
+    html = html.replace('</body>', stealthScript + '</body>');
+  } else {
+    html += stealthScript;
+  }
+
   return html;
+}
+
+function rewriteJs(js, baseUrl) {
+  js = js.replace(/"(https?:\/\/[^"]+)"/g, (m, u) => {
+    if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
+    return '"' + toProxyUrl(u) + '"';
+  });
+  js = js.replace(/'(https?:\/\/[^']+)'/g, (m, u) => {
+    if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
+    return "'" + toProxyUrl(u) + "'";
+  });
+  return js;
 }
 
 function parseCookieHeader(str) {
@@ -216,6 +212,7 @@ function parseSetCookie(str) {
     domain: null,
     expires: null,
     secure: false,
+    httpOnly: false,
   };
   for (const a of parts) {
     const ei = a.indexOf('=');
@@ -226,6 +223,7 @@ function parseSetCookie(str) {
     else if (k === 'expires') { const t = Date.parse(v); if (t) cookie.expires = t; }
     else if (k === 'max-age') { const n = parseInt(v, 10); if (!isNaN(n)) cookie.expires = Date.now() + n * 1000; }
     else if (k === 'secure') cookie.secure = true;
+    else if (k === 'httponly') cookie.httpOnly = true;
   }
   return cookie;
 }
@@ -236,7 +234,7 @@ function getOrCreateSid(req, res) {
   if (!sid) {
     sid = generateSessionId();
     const prev = res.getHeader('set-cookie');
-    const next = `midas_sid=${sid}; Path=/; HttpOnly; SameSite=Lax`;
+    const next = 'midas_sid=' + sid + '; Path=/; HttpOnly; SameSite=Lax';
     res.setHeader('set-cookie', prev ? [].concat(prev, next) : next);
   }
   return sid;
@@ -249,7 +247,7 @@ function jarFor(sid) {
 }
 
 function hostMatches(cookieHost, requestHost) {
-  if (!cookieHost) return false;
+  if (!cookieHost) return true;
   if (cookieHost === requestHost) return true;
   return requestHost.endsWith('.' + cookieHost);
 }
@@ -263,7 +261,7 @@ function buildCookieHeader(jar, hostname, pathname, isHttps) {
       if (c.expires && c.expires < now) continue;
       if (!pathname.startsWith(c.path)) continue;
       if (c.secure && !isHttps) continue;
-      out.push(`${c.name}=${c.value}`);
+      out.push(c.name + '=' + c.value);
     }
   }
   return out.join('; ');
@@ -286,6 +284,66 @@ function storeCookies(jar, hostname, setCookieHeaders) {
 function decodeBody(buf, charset) {
   try { return new TextDecoder(charset || 'utf-8', { fatal: false }).decode(buf); }
   catch { return buf.toString('utf8'); }
+}
+
+function proxyRequest(req, res, targetUrl, options = {}) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(targetUrl);
+    const lib = url.protocol === 'https:' ? https : http;
+    const isPassthrough = options.passthrough || isCaptchaUrl(targetUrl);
+
+    const headers = options.headers || {};
+    if (isPassthrough) {
+      Object.assign(headers, buildPassthroughHeaders(req.headers, targetUrl));
+    }
+
+    delete headers['host'];
+    headers['host'] = url.host;
+
+    const reqOptions = {
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname + url.search,
+      method: options.method || req.method || 'GET',
+      headers,
+      rejectUnauthorized: false,
+    };
+
+    const proxyReq = lib.request(reqOptions, (proxyRes) => {
+      const outHeaders = { ...proxyRes.headers };
+      delete outHeaders['content-security-policy'];
+      delete outHeaders['content-security-policy-report-only'];
+      delete outHeaders['strict-transport-security'];
+      delete outHeaders['x-frame-options'];
+      delete outHeaders['set-cookie'];
+
+      if (isPassthrough) {
+        outHeaders['access-control-allow-origin'] = req.headers['origin'] || '*';
+        outHeaders['access-control-allow-credentials'] = 'true';
+      }
+
+      res.writeHead(proxyRes.statusCode, outHeaders);
+      proxyRes.pipe(res);
+      proxyRes.on('end', resolve);
+    });
+
+    proxyReq.on('error', (err) => {
+      if (!res.headersSent) {
+        res.writeHead(502, { 'content-type': 'text/plain' });
+        res.end('Proxy error');
+      }
+      reject(err);
+    });
+
+    if (options.body) {
+      proxyReq.write(options.body);
+      proxyReq.end();
+    } else if (req.method !== 'GET' && req.method !== 'HEAD') {
+      req.pipe(proxyReq);
+    } else {
+      proxyReq.end();
+    }
+  });
 }
 
 function browseHandler(req, res, targetUrl, depth = 0) {
@@ -322,6 +380,11 @@ function browseHandler(req, res, targetUrl, depth = 0) {
   const cookieHeader = buildCookieHeader(jar, url.hostname, url.pathname, isHttps);
   if (cookieHeader) headers['cookie'] = cookieHeader;
 
+  const isCaptchaRequest = isCaptchaUrl(targetUrl);
+  if (isCaptchaRequest) {
+    Object.assign(headers, buildPassthroughHeaders(req.headers, targetUrl));
+  }
+
   const options = {
     hostname: url.hostname,
     port: url.port || (isHttps ? 443 : 80),
@@ -338,12 +401,10 @@ function browseHandler(req, res, targetUrl, depth = 0) {
       const next = resolveUrl(url.toString(), proxyRes.headers.location);
       proxyRes.resume();
       if (next) {
-        // For GET/HEAD, follow redirects transparently for smoother iframe experience
         if (req.method === 'GET' || req.method === 'HEAD') {
           browseHandler(req, res, next, depth + 1);
           return;
         }
-        // For other methods, return 302 to client
         res.writeHead(302, { location: toProxyUrl(next), 'cache-control': 'no-store' });
         res.end();
         return;
@@ -374,16 +435,41 @@ function browseHandler(req, res, targetUrl, depth = 0) {
 
     const isHtml = ct.includes('text/html') || ct.includes('application/xhtml');
     const isCss = ct.includes('text/css');
+    const isJs = ct.includes('javascript') || ct.includes('/ecmascript');
+    const isJson = ct.includes('application/json');
 
-    if (isHtml || isCss) {
+    if (isCaptchaRequest && !isHtml) {
+      res.writeHead(proxyRes.statusCode, outHeaders);
+      stream.pipe(res);
+      return;
+    }
+
+    if (isHtml || isCss || isJs || isJson) {
       const chunks = [];
       stream.on('data', c => chunks.push(c));
       stream.on('error', () => { if (!res.headersSent) { res.writeHead(502); res.end('decode error'); } });
       stream.on('end', () => {
         const buf = Buffer.concat(chunks);
         const text = decodeBody(buf, charset);
-        const out = isHtml ? rewriteHtml(text, url.toString()) : rewriteCss(text, url.toString());
-        outHeaders['content-type'] = isHtml ? 'text/html; charset=utf-8' : 'text/css; charset=utf-8';
+        const baseProxyUrl = '/_midas/' + currentPaths.browse;
+        let out = text;
+
+        if (isHtml) {
+          out = rewriteHtml(text, url.toString(), baseProxyUrl);
+          outHeaders['content-type'] = 'text/html; charset=utf-8';
+        } else if (isCss) {
+          out = rewriteCss(text, url.toString());
+          outHeaders['content-type'] = 'text/css; charset=utf-8';
+        } else if (isJs) {
+          out = rewriteJs(text, url.toString());
+          outHeaders['content-type'] = ct || 'application/javascript; charset=utf-8';
+        } else if (isJson) {
+          out = text.replace(/"(https?:\/\/[^"]+)"/g, (m, u) => {
+            if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
+            return '"' + toProxyUrl(u) + '"';
+          });
+        }
+
         res.writeHead(proxyRes.statusCode, outHeaders);
         res.end(out);
       });
@@ -417,7 +503,6 @@ export function router(req, res, url) {
   const pathname = url.pathname;
   const pathType = matchPolymorphicPath(pathname, currentPaths);
 
-  // Legacy fixed session endpoint for client discovery
   if (pathname === '/_midas/session') {
     const sid = generateSessionId();
     const transport = url.searchParams.get('t') || 'chunked';
@@ -432,7 +517,6 @@ export function router(req, res, url) {
     return;
   }
 
-  // Noise endpoint - returns random data to confuse traffic analysis
   if (pathType === 'noise') {
     const size = 100 + Math.floor(Math.random() * 900);
     const noise = Buffer.alloc(size);
@@ -446,7 +530,6 @@ export function router(req, res, url) {
     return;
   }
 
-  // Browse endpoint
   if (pathType === 'browse') {
     const target = url.searchParams.get('url');
     if (!target) { res.writeHead(400); res.end('missing url'); return; }
@@ -454,7 +537,6 @@ export function router(req, res, url) {
     return;
   }
 
-  // Session endpoint
   if (pathType === 'session') {
     const sid = generateSessionId();
     const transport = url.searchParams.get('t') || 'chunked';
@@ -469,7 +551,6 @@ export function router(req, res, url) {
     return;
   }
 
-  // Stream endpoint
   if (pathType === 'stream') {
     const sid = url.searchParams.get('sid');
     if (!sid || !ACTIVE_TRANSPORTS.has(sid)) {
@@ -480,16 +561,15 @@ export function router(req, res, url) {
       'cache-control': 'no-cache',
       'connection': 'keep-alive',
     });
-    res.write(`:ok\n\n`);
+    res.write(':ok\n\n');
     const interval = setInterval(() => {
       if (res.writableEnded) { clearInterval(interval); return; }
-      res.write(`:ping\n\n`);
+      res.write(':ping\n\n');
     }, 30000);
     req.on('close', () => clearInterval(interval));
     return;
   }
 
-  // GET proxy for subresources
   if (pathType === 'proxy') {
     const target = url.searchParams.get('url');
     if (!target) { res.writeHead(400); res.end(); return; }
@@ -499,7 +579,6 @@ export function router(req, res, url) {
     return;
   }
 
-  // Fetch endpoint
   if (pathType === 'fetch') {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -558,7 +637,6 @@ export function router(req, res, url) {
     return;
   }
 
-  // Chunk endpoint
   if (pathType === 'chunk') {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -599,14 +677,13 @@ export function router(req, res, url) {
     return;
   }
 
-  // Passthrough endpoint
   if (pathType === 'passthrough') {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', async () => {
       try {
         const data = JSON.parse(body);
-        await proxyRequest(req, res, data.url, true);
+        await proxyRequest(req, res, data.url, { passthrough: true });
       } catch (e) {
         res.writeHead(400); res.end();
       }
@@ -614,13 +691,11 @@ export function router(req, res, url) {
     return;
   }
 
-  // WebSocket bridge endpoint
   if (pathType === 'wsBridge') {
     wsBridgeHandler(req, res, url);
     return;
   }
 
-  // Legacy fallback for static _midas paths (backward compat)
   if (pathname.startsWith('/_midas/')) {
     const legacyPath = pathname.replace('/_midas/', '');
     if (legacyPath.startsWith('browse')) {
@@ -632,7 +707,6 @@ export function router(req, res, url) {
       if (target) { proxyRequest(req, res, target).catch(() => {}); return; }
     }
     if (legacyPath.startsWith('fetch')) {
-      // Quick legacy fetch handler
       let body = '';
       req.on('data', chunk => body += chunk);
       req.on('end', () => {
@@ -665,5 +739,3 @@ export function router(req, res, url) {
 
   res.writeHead(404); res.end();
 }
-
-

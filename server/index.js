@@ -53,10 +53,9 @@ const INDEX_HTML = `<!doctype html>
   <button id="go">Go</button>
   <span id="status"></span>
 </div>
-  <iframe id="frame" name="midas-frame" src="about:blank" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation allow-downloads"></iframe>
+  <iframe id="frame" name="midas-frame" src="about:blank" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation allow-downloads allow-modals allow-orientation-lock allow-pointer-lock allow-presentation"></iframe>
 <script>
 (()=>{
-  // Search engines that work cleanly through a GET-only proxy.
   const ENGINES = {
     ddg:   q => 'https://duckduckgo.com/?q=' + encodeURIComponent(q),
     bing:  q => 'https://www.bing.com/search?q=' + encodeURIComponent(q),
@@ -74,11 +73,6 @@ const INDEX_HTML = `<!doctype html>
   let cursor = -1;
   let suppressPush = false;
 
-  // Polymorphic-path discovery: the server rotates its endpoint paths every
-  // few minutes and exposes them via /_midas/session. We use the live browse
-  // path so traffic blends in with the proxy's anti-detection scheme, and
-  // fall back to the static "/_midas/browse" alias the server keeps for
-  // backwards compatibility if discovery ever fails.
   let paths = null;
   let pathsFetched = 0;
   const PATHS_TTL = 4 * 60 * 1000;
@@ -108,28 +102,26 @@ const INDEX_HTML = `<!doctype html>
   engine.addEventListener('change', () => { try { localStorage.setItem('midas.engine', engine.value); } catch {} });
 
   function looksLikeUrl(v){
-    if (/^https?:\\/\\//i.test(v)) return true;
-    if (/\\s/.test(v)) return false;
-    if (/^localhost(:|\\/|$)/i.test(v)) return true;
-    if (/^[\\w-]+(\\.[\\w-]+)+([:\\/?#]|$)/.test(v)) return true;
-    if (/^\\d{1,3}(\\.\\d{1,3}){3}([:\\/?#]|$)/.test(v)) return true;
+    if (/^https?:\/\//i.test(v)) return true;
+    if (/\s/.test(v)) return false;
+    if (/^localhost(:|\/|$)/i.test(v)) return true;
+    if (/^[\w-]+(\.[\w-]+)+([:\/?#]|$)/.test(v)) return true;
+    if (/^\d{1,3}(\.\d{1,3}){3}([:\/?#]|$)/.test(v)) return true;
     return false;
   }
 
   function smartUrl(input){
     const v = input.trim();
     if (!v) return null;
-    // Already a proxy URL (any polymorphic flavor) — use as-is.
     try {
       const p = new URL(v, location.origin);
       if (p.origin === location.origin && isProxyPath(p.pathname)) return location.origin + p.pathname + p.search;
     } catch {}
-    if (looksLikeUrl(v)) return /^https?:\\/\\//i.test(v) ? v : 'https://' + v;
+    if (looksLikeUrl(v)) return /^https?:\/\//i.test(v) ? v : 'https://' + v;
     return ENGINES[engine.value](v);
   }
 
   function toProxy(target){
-    // Pass through anything already aimed at a proxy endpoint (any rotation).
     try {
       const p = new URL(target, location.origin);
       if (p.origin === location.origin && isProxyPath(p.pathname)) return p.pathname + p.search;
@@ -153,7 +145,7 @@ const INDEX_HTML = `<!doctype html>
 
   function setLoading(b){
     document.body.classList.toggle('loading', b);
-    if (b) status.textContent = 'Loading…';
+    if (b) status.textContent = 'Loading...';
     else status.textContent = '';
   }
 
@@ -198,7 +190,6 @@ const INDEX_HTML = `<!doctype html>
     if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'l') { e.preventDefault(); ui.focus(); }
   });
 
-  // Sync URL bar with whatever the iframe is actually showing
   frame.addEventListener('load', () => {
     setLoading(false);
     let src = frame.src || '';
@@ -225,12 +216,9 @@ const INDEX_HTML = `<!doctype html>
     updateButtons();
   });
 
-  // Pull the live polymorphic paths up front so the very first navigation
-  // already uses them; refresh quietly in the background as they rotate.
   getPaths(true);
   setInterval(() => getPaths(true), PATHS_TTL);
 
-  // Allow opening this page with ?q=... or ?url=... for deep links
   const initial = new URLSearchParams(location.search);
   const initQ = initial.get('q');
   const initU = initial.get('url');
@@ -281,7 +269,6 @@ function handler(req, res) {
     return;
   }
 
-  // Serve any static file from public directory
   const staticFiles = ['/sw.js', '/loader.js', '/midas.client.js', '/manifest.json', '/demo.html', '/index.html'];
   const isStatic = staticFiles.includes(url.pathname) || url.pathname.match(/\.(js|html|css|json|wasm|png|jpg|svg|ico)$/);
   if (isStatic) {
@@ -313,9 +300,6 @@ if (USE_HTTP2) {
       key = fs.readFileSync(keyPath);
       cert = fs.readFileSync(certPath);
     } else {
-      const { generateKeyPairSync } = await import('crypto');
-      const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-      // Note: self-signed cert generation simplified; in prod use real certs
       console.warn('No TLS certs found, falling back to HTTP/1.1');
       throw new Error('No certs');
     }
@@ -331,3 +315,4 @@ if (USE_HTTP2) {
 }
 
 server.listen(PORT, HOST);
+

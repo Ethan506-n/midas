@@ -338,6 +338,12 @@ function browseHandler(req, res, targetUrl, depth = 0) {
       const next = resolveUrl(url.toString(), proxyRes.headers.location);
       proxyRes.resume();
       if (next) {
+        // For GET/HEAD, follow redirects transparently for smoother iframe experience
+        if (req.method === 'GET' || req.method === 'HEAD') {
+          browseHandler(req, res, next, depth + 1);
+          return;
+        }
+        // For other methods, return 302 to client
         res.writeHead(302, { location: toProxyUrl(next), 'cache-control': 'no-store' });
         res.end();
         return;

@@ -53,12 +53,12 @@ const INDEX_HTML = `<!doctype html>
   <button id="go">Go</button>
   <span id="status"></span>
 </div>
-<iframe id="frame" name="midas-frame" src="about:blank" referrerpolicy="no-referrer"></iframe>
+  <iframe id="frame" name="midas-frame" src="about:blank" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation allow-downloads"></iframe>
 <script>
 (()=>{
   // Search engines that work cleanly through a GET-only proxy.
   const ENGINES = {
-    ddg:   q => 'https://lite.duckduckgo.com/lite/?q=' + encodeURIComponent(q),
+    ddg:   q => 'https://duckduckgo.com/?q=' + encodeURIComponent(q),
     bing:  q => 'https://www.bing.com/search?q=' + encodeURIComponent(q),
     brave: q => 'https://search.brave.com/search?q=' + encodeURIComponent(q),
     wiki:  q => 'https://en.wikipedia.org/w/index.php?search=' + encodeURIComponent(q)

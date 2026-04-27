@@ -1,15 +1,15 @@
 /**
- * WebSocket-over-HTTP Bridge Server
- * Maintains "virtual" WebSocket connections that are polled by the client over HTTP.
- * No actual WebSocket connections are used, defeating WebSocket traffic pattern detection.
+ * WebSocket Bridge — proxies real WebSocket connections through HTTP upgrade.
+ * Uses the 'ws' library for real bidirectional WebSocket tunneling.
  */
 
 import http from 'http';
 import https from 'https';
 import { URL } from 'url';
+import WebSocket from 'ws';
 
 const BRIDGE_SESSIONS = new Map();
-const SESSION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+const SESSION_TIMEOUT = 5 * 60 * 1000;
 
 function generateBridgeId() {
   return Array.from({ length: 32 }, () =>
@@ -23,44 +23,23 @@ function cleanupSessions() {
   const now = Date.now();
   for (const [id, session] of BRIDGE_SESSIONS) {
     if (now - session.lastActivity > SESSION_TIMEOUT) {
-      if (session.ws) {
-        try { session.ws.close(); } catch (e) {}
-      }
+      try { session.clientWs?.close(); } catch (e) {}
+      try { session.serverWs?.close(); } catch (e) {}
       BRIDGE_SESSIONS.delete(id);
     }
   }
 }
-
 setInterval(cleanupSessions, 60000);
 
-function createRealWebSocket(url) {
+function createServerWebSocket(targetUrl, headers) {
   return new Promise((resolve, reject) => {
-    const wsUrl = new URL(url);
-    const lib = wsUrl.protocol === 'wss:' ? https : http;
-    const options = {
-      hostname: wsUrl.hostname,
-      port: wsUrl.port || (wsUrl.protocol === 'wss:' ? 443 : 80),
-      path: wsUrl.pathname + wsUrl.search,
-      method: 'GET',
-      headers: {
-        'upgrade': 'websocket',
-        'connection': 'Upgrade',
-        'sec-websocket-key': Buffer.from(Math.random().toString()).toString('base64'),
-        'sec-websocket-version': '13',
-      },
+    const ws = new WebSocket(targetUrl, {
+      headers: headers || {},
       rejectUnauthorized: false,
-    };
-
-    const req = lib.request(options, (res) => {
-      reject(new Error(`WS upgrade failed: ${res.statusCode}`));
     });
-
-    req.on('upgrade', (res, socket) => {
-      resolve({ socket, headers: res.headers });
-    });
-
-    req.on('error', reject);
-    req.end();
+    ws.once('open', () => resolve(ws));
+    ws.once('error', reject);
+    ws.once('close', () => reject(new Error('WS closed immediately')));
   });
 }
 
@@ -84,15 +63,46 @@ export function wsBridgeHandler(req, res, url) {
           closed: false,
           closeCode: null,
           closeReason: '',
-          ws: null,
+          clientWs: null,
+          serverWs: null,
         };
 
-        // For now, store session without real WS connection
-        // In production, this would connect to the real WS server
+        try {
+          const serverWs = await createServerWebSocket(data.url, data.headers);
+          session.serverWs = serverWs;
+
+          serverWs.on('message', (data, isBinary) => {
+            session.lastActivity = Date.now();
+            const msg = {
+              id: (session.lastRecvId = (session.lastRecvId || 0) + 1),
+              direction: 'in',
+              text: isBinary ? null : data.toString(),
+              binary: isBinary ? Buffer.from(data).toString('base64') : null,
+            };
+            session.messages.push(msg);
+          });
+
+          serverWs.on('close', (code, reason) => {
+            session.closed = true;
+            session.closeCode = code;
+            session.closeReason = reason?.toString() || '';
+          });
+
+          serverWs.on('error', () => {
+            session.closed = true;
+            session.closeCode = 1011;
+          });
+        } catch (e) {
+          // Store session anyway so client can poll for failure
+          session.closed = true;
+          session.closeCode = 1006;
+          session.closeReason = 'connect failed';
+        }
+
         BRIDGE_SESSIONS.set(bridgeId, session);
 
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ sid: bridgeId, status: 'opened' }));
+        res.end(JSON.stringify({ sid: bridgeId, status: session.serverWs ? 'opened' : 'failed' }));
       } catch (e) {
         res.writeHead(400); res.end();
       }
@@ -110,10 +120,14 @@ export function wsBridgeHandler(req, res, url) {
         if (!session) { res.writeHead(404); res.end(); return; }
 
         session.lastActivity = Date.now();
-        // Store outbound messages
-        if (data.messages) {
+
+        if (data.messages && session.serverWs && session.serverWs.readyState === WebSocket.OPEN) {
           for (const msg of data.messages) {
-            session.messages.push({ id: ++session.lastRecvId || 0, direction: 'out', text: msg });
+            if (msg.binary) {
+              session.serverWs.send(Buffer.from(msg.binary, 'base64'));
+            } else if (msg.text !== undefined) {
+              session.serverWs.send(msg.text);
+            }
           }
         }
 
@@ -159,9 +173,7 @@ export function wsBridgeHandler(req, res, url) {
           session.closed = true;
           session.closeCode = data.code || 1000;
           session.closeReason = data.reason || '';
-          if (session.ws) {
-            try { session.ws.close(); } catch (e) {}
-          }
+          try { session.serverWs?.close(); } catch (e) {}
         }
         res.writeHead(200); res.end(JSON.stringify({ ok: true }));
       } catch (e) {
@@ -173,5 +185,4 @@ export function wsBridgeHandler(req, res, url) {
 
   res.writeHead(404); res.end();
 }
-
 

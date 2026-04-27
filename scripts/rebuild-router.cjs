@@ -1,0 +1,72 @@
+const fs = require('fs');
+const out = 'c:/Users/BigEP/OneDrive/Documents/GitHub/midas/server/router.js';
+
+let c = '';
+
+function add(s) { c += s + '\n'; }
+
+add(`import http from 'http';`);
+add(`import https from 'https';`);
+add(`import zlib from 'zlib';`);
+add(`import { URL } from 'url';`);
+add(`import { getEndpointPaths, matchPolymorphicPath } from './polymorph-router.js';`);
+add(`import { wsBridgeHandler } from './ws-bridge.js';`);
+add(`import { isCaptchaUrl, buildPassthroughHeaders } from './captcha-handler.js';`);
+add(``);
+add(`const ACTIVE_TRANSPORTS = new Map();`);
+add(`const COOKIE_JAR = new Map();`);
+add(``);
+add(`let currentPaths = getEndpointPaths();`);
+add(`function refreshPaths() { currentPaths = getEndpointPaths(); }`);
+add(`setInterval(refreshPaths, 60000);`);
+add(``);
+add(`function generateSessionId() {`);
+add(`  return Array.from({ length: 24 }, () =>`);
+add(`    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'[`);
+add(`      Math.floor(Math.random() * 62)`);
+add(`    ]`);
+add(`  ).join('');`);
+add(`}`);
+add(``);
+add(`function setCors(res) {`);
+add(`  res.setHeader('access-control-allow-origin', '*');`);
+add(`  res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS, PUT, DELETE, PATCH, HEAD');`);
+add(`  res.setHeader('access-control-allow-headers', '*');`);
+add(`  res.setHeader('access-control-max-age', '86400');`);
+add(`}`);
+add(``);
+add(`function toProxyUrl(target) {`);
+add(`  return '/_midas/' + currentPaths.browse + '?url=' + encodeURIComponent(target);`);
+add(`}`);
+add(``);
+add(`function htmlDecode(s) {`);
+add(`  return s`);
+add(`    .replace(/&amp;/g, '&')`);
+add(`    .replace(/</g, '<')`);
+add(`    .replace(/>/g, '>')`);
+add(`    .replace(/"/g, '"')`);
+add(`    .replace(/&#0?39;/g, "'")`);
+add(`    .replace(/&#x27;/gi, "'")`);
+add(`    .replace(/&nbsp;/g, ' ');`);
+add(`}`);
+add(``);
+add(`function resolveUrl(base, ref) {`);
+add(`  try { return new URL(htmlDecode(ref), base).toString(); } catch { return null; }`);
+add(`}`);
+add(``);
+add(`function isAlreadyProxied(v) {`);
+add(`  return typeof v === 'string' && (v.includes('/_midas/') || v.startsWith('/_midas/'));`);
+add(`}`);
+add(``);
+add(`function extractOriginalFromProxy(u) {`);
+add(`  try {`);
+add(`    const parsed = new URL(u, 'http://x');`);
+add(`    if (!parsed.pathname.includes('/_midas/')) return null;`);
+add(`    return parsed.searchParams.get('url');`);
+add(`  } catch { return null; }`);
+add(`}`);
+add(``);
+
+fs.writeFileSync(out, c);
+console.log('Part 1 done');
+

@@ -3,323 +3,238 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Midas Proxy - Demo</title>
+<title>Midas Proxy</title>
 <style>
+  :root { color-scheme: dark; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #0f0f1a;
-    color: #e0e0ff;
-    min-height: 100vh;
+  html, body {
+    margin: 0;
+    height: 100%;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    background: #0d0f12;
+    color: #e8e8e8;
+  }
+  .bar {
     display: flex;
-    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    background: #16191f;
+    border-bottom: 1px solid #2a2f38;
     align-items: center;
-    padding: 2rem;
+    height: 50px;
   }
-  h1 {
-    font-size: 2.5rem;
-    margin-bottom: 0.5rem;
+  .bar button {
+    padding: 0 12px;
+    height: 34px;
+    min-width: 34px;
+    border: 1px solid #2a2f38;
+    background: #1d212a;
+    color: #cdd2da;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .bar button:hover:not(:disabled) { background: #262b36; border-color: #3a4150; }
+  .bar button:active:not(:disabled) { background: #1a1f28; }
+  .bar button:disabled { opacity: .35; cursor: not-allowed; }
+  .bar #go {
     background: linear-gradient(135deg, #667eea, #764ba2);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-  }
-  .subtitle {
-    color: #8892b0;
-    margin-bottom: 2rem;
-  }
-  .card {
-    background: #1a1a2e;
-    border-radius: 12px;
-    padding: 1.5rem;
-    width: 100%;
-    max-width: 900px;
-    margin-bottom: 1rem;
-    border: 1px solid #2a2a4e;
-  }
-  .card h2 {
-    font-size: 1.1rem;
-    margin-bottom: 1rem;
-    color: #a0a0ff;
-  }
-  .input-group {
-    display: flex;
-    gap: 0.5rem;
-    margin-bottom: 1rem;
-  }
-  input[type="text"] {
-    flex: 1;
-    padding: 0.75rem 1rem;
-    border-radius: 8px;
-    border: 1px solid #3a3a5e;
-    background: #0f0f1a;
-    color: #e0e0ff;
-    font-size: 1rem;
-  }
-  input[type="text"]:focus {
-    outline: none;
-    border-color: #667eea;
-  }
-  button {
-    padding: 0.75rem 1.5rem;
-    border-radius: 8px;
-    border: none;
-    background: linear-gradient(135deg, #667eea, #764ba2);
+    border-color: transparent;
     color: white;
     font-weight: 600;
-    cursor: pointer;
-    transition: opacity 0.2s;
+    padding: 0 16px;
   }
-  button:hover { opacity: 0.9; }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-secondary {
-    background: #2a2a4e;
-    padding: 0.5rem 1rem;
-    font-size: 0.85rem;
+  .bar #go:hover { opacity: 0.9; }
+  #u {
+    flex: 1;
+    height: 34px;
+    padding: 0 12px;
+    border: 1px solid #2a2f38;
+    background: #0a0c10;
+    color: #f0f0f0;
+    border-radius: 6px;
+    font: inherit;
+    outline: none;
+    min-width: 0;
   }
-  .status {
-    font-family: monospace;
-    font-size: 0.85rem;
-    padding: 0.75rem;
-    background: #0f0f1a;
-    border-radius: 8px;
-    border: 1px solid #2a2a4e;
-    min-height: 3rem;
-    white-space: pre-wrap;
-    word-break: break-all;
+  #u:focus { border-color: #667eea; box-shadow: 0 0 0 2px #667eea33; }
+  #status {
+    font-size: 12px;
+    color: #7a8290;
+    padding: 0 6px;
+    white-space: nowrap;
   }
-  .status.success { border-color: #4caf50; color: #a5d6a7; }
-  .status.error { border-color: #f44336; color: #ef9a9a; }
-  .features {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 0.75rem;
-    margin-top: 1rem;
-  }
-  .feature {
-    background: #0f0f1a;
-    padding: 0.75rem;
-    border-radius: 8px;
-    border: 1px solid #2a2a4e;
-    font-size: 0.85rem;
-  }
-  .feature .label {
-    color: #667eea;
-    font-weight: 600;
+  #frame {
+    width: 100%;
+    height: calc(100% - 50px);
+    border: 0;
+    background: #fff;
     display: block;
-    margin-bottom: 0.25rem;
   }
-  .quick-links {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin-bottom: 1rem;
+  .loading #status::before {
+    content: '';
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border: 2px solid #667eea;
+    border-top-color: transparent;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: -2px;
+    animation: spin .8s linear infinite;
   }
-  .iframe-container {
-    width: 100%;
-    max-width: 1000px;
-    height: 600px;
-    border-radius: 12px;
-    overflow: hidden;
-    border: 1px solid #2a2a4e;
-    background: #0f0f1a;
-    margin-top: 1rem;
-  }
-  iframe {
-    width: 100%;
-    height: 100%;
-    border: none;
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .engine { position: relative; }
+  .engine select {
+    height: 34px;
+    background: #1d212a;
+    color: #cdd2da;
+    border: 1px solid #2a2f38;
+    border-radius: 6px;
+    padding: 0 8px;
+    font: inherit;
+    cursor: pointer;
   }
 </style>
 </head>
 <body>
-
-<h1>Midas Proxy</h1>
-<p class="subtitle">Advanced detection-evading proxy engine</p>
-
-<div class="card">
-  <h2>Navigate</h2>
-  <div class="input-group">
-    <input type="text" id="urlInput" placeholder="https://example.com" value="https://duckduckgo.com">
-    <button id="goBtn" onclick="navigate()">Go</button>
-  </div>
-  <div class="quick-links">
-    <button class="btn-secondary" onclick="loadUrl('https://duckduckgo.com')">DuckDuckGo Full</button>
-    <button class="btn-secondary" onclick="loadUrl('https://lite.duckduckgo.com/lite/')">DuckDuckGo Lite</button>
-    <button class="btn-secondary" onclick="loadUrl('https://html.duckduckgo.com/html/')">DuckDuckGo HTML</button>
-    <button class="btn-secondary" onclick="loadUrl('https://en.wikipedia.org/wiki/Main_Page')">Wikipedia</button>
-    <button class="btn-secondary" onclick="loadUrl('https://news.ycombinator.com')">Hacker News</button>
-  </div>
-  <div class="status" id="navStatus">Ready — select a site above or enter any URL</div>
+<div class="bar">
+  <button id="back" title="Back (Alt+Left)" aria-label="Back">&lsaquo;</button>
+  <button id="fwd" title="Forward (Alt+Right)" aria-label="Forward">&rsaquo;</button>
+  <button id="reload" title="Reload (F5)" aria-label="Reload">&#x21bb;</button>
+  <button id="home" title="Home" aria-label="Home">&#x2302;</button>
+  <input id="u" type="text" placeholder="Search or enter URL" autofocus spellcheck="false" autocomplete="off">
+  <span class="engine">
+    <select id="engine" title="Search engine">
+      <option value="ddg">DuckDuckGo</option>
+      <option value="bing">Bing</option>
+      <option value="brave">Brave</option>
+      <option value="wiki">Wikipedia</option>
+    </select>
+  </span>
+  <button id="go">Go</button>
+  <span id="status"></span>
 </div>
+<iframe id="frame" name="midas-frame" src="about:blank" referrerpolicy="no-referrer"></iframe>
 
-<div class="card">
-  <h2>System Status</h2>
-  <div class="features">
-    <div class="feature">
-      <span class="label">Transport</span>
-      <span id="transportStatus">Initializing...</span>
-    </div>
-    <div class="feature">
-      <span class="label">Service Worker</span>
-      <span id="swStatus">Checking...</span>
-    </div>
-    <div class="feature">
-      <span class="label">Environment</span>
-      <span id="envStatus">Checking...</span>
-    </div>
-    <div class="feature">
-      <span class="label">Fingerprint</span>
-      <span id="fpStatus">Checking...</span>
-    </div>
-    <div class="feature">
-      <span class="label">Paths</span>
-      <span id="pathStatus">Checking...</span>
-    </div>
-    <div class="feature">
-      <span class="label">Detection</span>
-      <span id="detectStatus">Checking...</span>
-    </div>
-  </div>
-</div>
-
-<div class="card">
-  <h2>WebSocket Test</h2>
-  <div class="input-group">
-    <input type="text" id="wsUrl" placeholder="wss://echo.websocket.org/" value="wss://echo.websocket.org/">
-    <button id="wsBtn" onclick="testWebSocket()">Connect</button>
-  </div>
-  <div class="status" id="wsStatus">Not connected</div>
-</div>
-
-<div class="iframe-container">
-  <iframe id="proxyFrame" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation"></iframe>
-</div>
-
-<script src="loader.js"></script>
 <script>
-  const navStatus = document.getElementById('navStatus');
-  const wsStatus = document.getElementById('wsStatus');
-  const transportStatus = document.getElementById('transportStatus');
-  const swStatus = document.getElementById('swStatus');
-  const envStatus = document.getElementById('envStatus');
-  const fpStatus = document.getElementById('fpStatus');
-  const pathStatus = document.getElementById('pathStatus');
-  const detectStatus = document.getElementById('detectStatus');
-  const proxyFrame = document.getElementById('proxyFrame');
-  const urlInput = document.getElementById('urlInput');
+(() => {
+  const ENGINES = {
+    ddg:   q => 'https://duckduckgo.com/?q=' + encodeURIComponent(q),
+    bing:  q => 'https://www.bing.com/search?q=' + encodeURIComponent(q),
+    brave: q => 'https://search.brave.com/search?q=' + encodeURIComponent(q),
+    wiki:  q => 'https://en.wikipedia.org/w/index.php?search=' + encodeURIComponent(q)
+  };
 
-  function getBrowsePath() {
-    if (window.__midasPaths && window.__midasPaths.browse) {
-      return '/_midas/' + window.__midasPaths.browse;
-    }
+  const $ = id => document.getElementById(id);
+  const frame = $('frame');
+  const ui = $('u');
+  const status = $('status');
+  const engine = $('engine');
+
+  const stack = [];
+  let cursor = -1;
+  let suppressPush = false;
+
+  function browsePath() {
     return '/_midas/browse';
   }
 
-  function loadUrl(url) {
-    urlInput.value = url;
-    navigate();
+  function looksLikeUrl(v) {
+    if (/^https?:\/\//i.test(v)) return true;
+    if (/\s/.test(v)) return false;
+    if (/^localhost(:|\/|$)/i.test(v)) return true;
+    if (/^[\w-]+(\.[\w-]+)+([:\/?#]|$)/.test(v)) return true;
+    if (/^\d{1,3}(\.\d{1,3}){3}([:\/?#]|$)/.test(v)) return true;
+    return false;
   }
 
-  async function navigate() {
-    const url = urlInput.value.trim();
-    if (!url) return;
-    navStatus.textContent = 'Loading ' + url + '...';
-    navStatus.className = 'status';
+  function smartUrl(input) {
+    const v = input.trim();
+    if (!v) return null;
+    if (looksLikeUrl(v)) return /^https?:\/\//i.test(v) ? v : 'https://' + v;
+    return ENGINES[engine.value](v);
+  }
 
-    try {
-      const browsePath = getBrowsePath();
-      const proxyUrl = browsePath + '?url=' + encodeURIComponent(url);
-      proxyFrame.src = proxyUrl;
-      navStatus.textContent = 'Loaded via proxy: ' + url;
-      navStatus.className = 'status success';
-    } catch (err) {
-      navStatus.textContent = 'Error: ' + err.message;
-      navStatus.className = 'status error';
+  function toProxy(target) {
+    return browsePath() + '?url=' + encodeURIComponent(target);
+  }
+
+  function setLoading(b) {
+    document.body.classList.toggle('loading', b);
+    if (b) status.textContent = 'Loading...';
+    else status.textContent = '';
+  }
+
+  function updateButtons() {
+    $('back').disabled = cursor <= 0;
+    $('fwd').disabled  = cursor >= stack.length - 1;
+  }
+
+  function navigate(target, push) {
+    const proxied = toProxy(target);
+    if (push) {
+      stack.splice(cursor + 1);
+      stack.push(proxied);
+      cursor = stack.length - 1;
     }
+    suppressPush = !push;
+    setLoading(true);
+    frame.src = proxied;
+    updateButtons();
   }
 
-  function testWebSocket() {
-    const url = document.getElementById('wsUrl').value;
-    wsStatus.textContent = 'Connecting to ' + url + '...';
-    wsStatus.className = 'status';
+  function go() {
+    const t = smartUrl(ui.value);
+    if (!t) return;
+    navigate(t, true);
+  }
 
+  $('go').onclick = go;
+  ui.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+  ui.addEventListener('focus', () => ui.select());
+
+  $('back').onclick   = () => { if (cursor > 0) { cursor--; navigate(stack[cursor], false); } };
+  $('fwd').onclick    = () => { if (cursor < stack.length - 1) { cursor++; navigate(stack[cursor], false); } };
+  $('reload').onclick = () => { if (cursor >= 0) { suppressPush = true; setLoading(true); frame.src = stack[cursor]; } };
+  $('home').onclick   = () => { stack.length = 0; cursor = -1; frame.src = 'about:blank'; ui.value = ''; ui.focus(); status.textContent = ''; updateButtons(); };
+
+  document.addEventListener('keydown', e => {
+    if (e.altKey && e.key === 'ArrowLeft')  { e.preventDefault(); $('back').click(); }
+    if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); $('fwd').click(); }
+    if (e.key === 'F5' || ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'r')) { e.preventDefault(); $('reload').click(); }
+    if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'l') { e.preventDefault(); ui.focus(); }
+  });
+
+  frame.addEventListener('load', () => {
+    setLoading(false);
+    let src = frame.src || '';
     try {
-      const ws = new WebSocket(url);
-      ws.onopen = () => {
-        wsStatus.textContent = 'Connected! Sending test message...';
-        wsStatus.className = 'status success';
-        ws.send('Hello from Midas!');
-      };
-      ws.onmessage = (e) => {
-        wsStatus.textContent = 'Received: ' + e.data;
-        ws.close();
-      };
-      ws.onerror = (e) => {
-        wsStatus.textContent = 'WebSocket error occurred';
-        wsStatus.className = 'status error';
-      };
-      ws.onclose = () => {
-        if (!wsStatus.classList.contains('success') && !wsStatus.classList.contains('error')) {
-          wsStatus.textContent = 'Connection closed';
-        }
-      };
-    } catch (err) {
-      wsStatus.textContent = 'Error: ' + err.message;
-      wsStatus.className = 'status error';
-    }
-  }
+      const inner = frame.contentWindow.location.href;
+      if (inner && inner !== 'about:blank') src = inner;
+    } catch {}
 
-  // Update status periodically
-  setInterval(() => {
-    if (typeof getTransport === 'function') {
-      try {
-        const t = getTransport();
-        transportStatus.textContent = t.constructor.name.replace('Transport', '');
-      } catch (e) {
-        transportStatus.textContent = 'Not ready';
+    const here = src.startsWith(location.origin) ? src.slice(location.origin.length) : src;
+    if (here && here.startsWith('/_midas/browse?') && !suppressPush) {
+      if (stack[cursor] !== here) {
+        stack.splice(cursor + 1);
+        stack.push(here);
+        cursor = stack.length - 1;
       }
     }
-
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.ready.then(() => {
-        swStatus.textContent = 'Active';
-      }).catch(() => {
-        swStatus.textContent = 'Inactive';
-      });
-    } else {
-      swStatus.textContent = 'Unsupported';
-    }
-
-    if (typeof isEnvironmentSafe === 'function') {
-      const status = isEnvironmentSafe();
-      envStatus.textContent = status ? 'Safe' : 'Unsafe';
-      envStatus.style.color = status ? '#4caf50' : '#f44336';
-    }
-
-    if (typeof getFingerprint === 'function') {
-      const fp = getFingerprint();
-      fpStatus.textContent = fp.canvasHash ? 'Randomized' : 'Native';
-    }
-
-    if (window.__midasPaths) {
-      pathStatus.textContent = 'Rotating';
-    } else {
-      pathStatus.textContent = 'Legacy';
-    }
-
-    if (typeof getEnvironmentStatus === 'function') {
-      const s = getEnvironmentStatus();
-      detectStatus.textContent = s.devtools ? 'DevTools!' : (s.instrumentation ? 'Instr!' : 'Clean');
-      detectStatus.style.color = s.devtools || s.instrumentation ? '#f44336' : '#4caf50';
-    }
-  }, 2000);
-
-  // Handle enter key
-  urlInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') navigate();
+    suppressPush = false;
+    updateButtons();
   });
-</script>
 
+  try { engine.value = localStorage.getItem('midas.engine') || 'ddg'; } catch {}
+  engine.addEventListener('change', () => { try { localStorage.setItem('midas.engine', engine.value); } catch {} });
+
+  updateButtons();
+})();
+</script>
 </body>
 </html>
-

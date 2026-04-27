@@ -277,8 +277,13 @@ function handler(req, res) {
   }
 
   if (url.pathname === '/') {
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(INDEX_HTML);
+    const demoPath = path.join(PUBLIC, 'demo.html');
+    if (fs.existsSync(demoPath)) {
+      serveStatic(req, res, '/demo.html');
+    } else {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(INDEX_HTML);
+    }
     return;
   }
 
@@ -315,4 +320,3 @@ if (USE_HTTP2) {
 }
 
 server.listen(PORT, HOST);
-

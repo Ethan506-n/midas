@@ -13,9 +13,14 @@ const CAPTCHA_PATTERNS = [
   { domain: 'js.hcaptcha.com', paths: ['/1/', '/hcaptcha.js'] },
   { domain: 'api.hcaptcha.com', paths: ['/checkcaptcha/', '/getcaptcha/'] },
   { domain: 'newassets.hcaptcha.com', paths: ['/captcha/'] },
-  // Cloudflare Turnstile
-  { domain: 'challenges.cloudflare.com', paths: ['/turnstile/'] },
+  // Cloudflare Turnstile & IUAM
+  { domain: 'challenges.cloudflare.com', paths: ['/turnstile/', '/cdn-cgi/challenge-platform/'] },
   { domain: 'cdnjs.cloudflare.com', paths: ['/ajax/libs/turnstile/'] },
+  // Cloudflare challenge assets
+  { domain: null, paths: [], patterns: [
+    /\/cdn-cgi\/challenge-platform/i,
+    /\/turnstile\//i,
+  ]},
   // Generic challenge patterns
   { domain: null, paths: [], patterns: [
     /recaptcha/i,

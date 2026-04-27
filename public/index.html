@@ -1,12 +1,212 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta http-equiv="refresh" content="0; url=/">
-  <title>Redirecting...</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Midas Proxy</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f0f1a;
+    color: #e0e0ff;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2rem;
+  }
+  h1 {
+    font-size: 2.5rem;
+    margin-bottom: 0.5rem;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .subtitle {
+    color: #8892b0;
+    margin-bottom: 2rem;
+  }
+  .card {
+    background: #1a1a2e;
+    border-radius: 12px;
+    padding: 1.5rem;
+    width: 100%;
+    max-width: 900px;
+    margin-bottom: 1rem;
+    border: 1px solid #2a2a4e;
+  }
+  .card h2 {
+    font-size: 1.1rem;
+    margin-bottom: 1rem;
+    color: #a0a0ff;
+  }
+  .input-group {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  input[type="text"] {
+    flex: 1;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    border: 1px solid #3a3a5e;
+    background: #0f0f1a;
+    color: #e0e0ff;
+    font-size: 1rem;
+  }
+  input[type="text"]:focus {
+    outline: none;
+    border-color: #667eea;
+  }
+  button {
+    padding: 0.75rem 1.5rem;
+    border-radius: 8px;
+    border: none;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: white;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+  button:hover { opacity: 0.9; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-secondary {
+    background: #2a2a4e;
+    padding: 0.5rem 1rem;
+    font-size: 0.85rem;
+  }
+  .status {
+    font-family: monospace;
+    font-size: 0.85rem;
+    padding: 0.75rem;
+    background: #0f0f1a;
+    border-radius: 8px;
+    border: 1px solid #2a2a4e;
+    min-height: 3rem;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .status.success { border-color: #4caf50; color: #a5d6a7; }
+  .status.error { border-color: #f44336; color: #ef9a9a; }
+  .features {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.75rem;
+    margin-top: 1rem;
+  }
+  .feature {
+    background: #0f0f1a;
+    padding: 0.75rem;
+    border-radius: 8px;
+    border: 1px solid #2a2a4e;
+    font-size: 0.85rem;
+  }
+  .feature .label {
+    color: #667eea;
+    font-weight: 600;
+    display: block;
+    margin-bottom: 0.25rem;
+  }
+  .quick-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  .iframe-container {
+    width: 100%;
+    max-width: 1000px;
+    height: 600px;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid #2a2a4e;
+    background: #0f0f1a;
+    margin-top: 1rem;
+  }
+  iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+  }
+  .info {
+    color: #667eea;
+    font-size: 0.85rem;
+    margin-top: 0.5rem;
+  }
+</style>
 </head>
 <body>
-  <p>Redirecting to <a href="/">Midas Proxy</a>...</p>
+
+<h1>Midas Proxy</h1>
+<p class="subtitle">Advanced detection-evading proxy engine</p>
+
+<div class="card">
+  <h2>Navigate</h2>
+  <div class="input-group">
+    <input type="text" id="urlInput" placeholder="https://example.com" value="https://lite.duckduckgo.com/lite/">
+    <button id="goBtn" onclick="navigate()">Go</button>
+  </div>
+  <div class="quick-links">
+    <button class="btn-secondary" onclick="loadUrl('https://lite.duckduckgo.com/lite/')">DuckDuckGo Lite</button>
+    <button class="btn-secondary" onclick="loadUrl('https://html.duckduckgo.com/html/')">DuckDuckGo HTML</button>
+    <button class="btn-secondary" onclick="loadUrl('https://en.wikipedia.org/wiki/Main_Page')">Wikipedia</button>
+    <button class="btn-secondary" onclick="loadUrl('https://news.ycombinator.com')">Hacker News</button>
+    <button class="btn-secondary" onclick="loadUrl('https://www.bing.com')">Bing</button>
+  </div>
+  <div class="status" id="navStatus">Ready — select a site above or enter any URL and press Enter</div>
+  <p class="info">Tip: Use DuckDuckGo HTML version for best compatibility. Forms, links, and navigation are fully intercepted.</p>
+</div>
+
+<div class="iframe-container">
+  <iframe id="proxyFrame"></iframe>
+</div>
+
+<script>
+  const navStatus = document.getElementById('navStatus');
+  const proxyFrame = document.getElementById('proxyFrame');
+  const urlInput = document.getElementById('urlInput');
+
+  function loadUrl(url) {
+    urlInput.value = url;
+    navigate();
+  }
+
+  async function navigate() {
+    let url = urlInput.value.trim();
+    if (!url) return;
+
+    if (!url.match(/^https?:\/\//i)) {
+      url = 'https://' + url;
+    }
+
+    navStatus.textContent = 'Loading ' + url + '...';
+    navStatus.className = 'status';
+
+    try {
+      const proxyUrl = '/_midas/browse?url=' + encodeURIComponent(url);
+      proxyFrame.src = proxyUrl;
+      navStatus.textContent = 'Loaded: ' + url;
+      navStatus.className = 'status success';
+    } catch (err) {
+      navStatus.textContent = 'Error: ' + err.message;
+      navStatus.className = 'status error';
+    }
+  }
+
+  // Handle enter key
+  urlInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') navigate();
+  });
+
+  // Listen for messages from the iframe (navigation requests from injected scripts)
+  window.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'midas-navigate') {
+      const proxyUrl = '/_midas/browse?url=' + encodeURIComponent(e.data.url);
+      proxyFrame.src = proxyUrl;
+    }
+  });
+</script>
+
 </body>
 </html>
-

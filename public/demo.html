@@ -135,13 +135,31 @@
   const ui = $('u');
   const status = $('status');
   const engine = $('engine');
+  const backBtn = $('back'), fwdBtn = $('fwd'), reloadBtn = $('reload'), homeBtn = $('home'), goBtn = $('go');
 
   const stack = [];
   let cursor = -1;
   let suppressPush = false;
+  let BROWSE = null;
+  let lastPathsFetch = 0;
+
+  async function fetchPaths() {
+    const now = Date.now();
+    if (BROWSE && now - lastPathsFetch < 5000) return;
+    try {
+      const r = await fetch('/_midas/session', { cache: 'no-store' });
+      const data = await r.json();
+      if (data && data.paths && data.paths.browse) {
+        BROWSE = data.paths.browse;
+        lastPathsFetch = now;
+      }
+    } catch (e) {
+      if (!BROWSE) BROWSE = 'browse';
+    }
+  }
 
   function browsePath() {
-    return '/_midas/browse';
+    return '/_midas/' + BROWSE;
   }
 
   function looksLikeUrl(v) {
@@ -171,11 +189,12 @@
   }
 
   function updateButtons() {
-    $('back').disabled = cursor <= 0;
-    $('fwd').disabled  = cursor >= stack.length - 1;
+    backBtn.disabled = cursor <= 0;
+    fwdBtn.disabled  = cursor >= stack.length - 1;
   }
 
-  function navigate(target, push) {
+  async function navigate(target, push) {
+    await fetchPaths();
     const proxied = toProxy(target);
     if (push) {
       stack.splice(cursor + 1);
@@ -188,25 +207,25 @@
     updateButtons();
   }
 
-  function go() {
+  async function go() {
     const t = smartUrl(ui.value);
     if (!t) return;
-    navigate(t, true);
+    await navigate(t, true);
   }
 
-  $('go').onclick = go;
+  goBtn.onclick = go;
   ui.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
   ui.addEventListener('focus', () => ui.select());
 
-  $('back').onclick   = () => { if (cursor > 0) { cursor--; navigate(stack[cursor], false); } };
-  $('fwd').onclick    = () => { if (cursor < stack.length - 1) { cursor++; navigate(stack[cursor], false); } };
-  $('reload').onclick = () => { if (cursor >= 0) { suppressPush = true; setLoading(true); frame.src = stack[cursor]; } };
-  $('home').onclick   = () => { stack.length = 0; cursor = -1; frame.src = 'about:blank'; ui.value = ''; ui.focus(); status.textContent = ''; updateButtons(); };
+  backBtn.onclick   = () => { if (cursor > 0) { cursor--; navigate(stack[cursor], false); } };
+  fwdBtn.onclick    = () => { if (cursor < stack.length - 1) { cursor++; navigate(stack[cursor], false); } };
+  reloadBtn.onclick = () => { if (cursor >= 0) { suppressPush = true; setLoading(true); frame.src = stack[cursor]; } };
+  homeBtn.onclick   = () => { stack.length = 0; cursor = -1; frame.src = 'about:blank'; ui.value = ''; ui.focus(); status.textContent = ''; updateButtons(); };
 
   document.addEventListener('keydown', e => {
-    if (e.altKey && e.key === 'ArrowLeft')  { e.preventDefault(); $('back').click(); }
-    if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); $('fwd').click(); }
-    if (e.key === 'F5' || ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'r')) { e.preventDefault(); $('reload').click(); }
+    if (e.altKey && e.key === 'ArrowLeft')  { e.preventDefault(); backBtn.click(); }
+    if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); fwdBtn.click(); }
+    if (e.key === 'F5' || ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'r')) { e.preventDefault(); reloadBtn.click(); }
     if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'l') { e.preventDefault(); ui.focus(); }
   });
 
@@ -219,7 +238,7 @@
     } catch {}
 
     const here = src.startsWith(location.origin) ? src.slice(location.origin.length) : src;
-    if (here && here.startsWith('/_midas/browse?') && !suppressPush) {
+    if (here && here.startsWith('/_midas/') && here.includes('?url=') && !suppressPush) {
       if (stack[cursor] !== here) {
         stack.splice(cursor + 1);
         stack.push(here);
@@ -233,7 +252,15 @@
   try { engine.value = localStorage.getItem('midas.engine') || 'ddg'; } catch {}
   engine.addEventListener('change', () => { try { localStorage.setItem('midas.engine', engine.value); } catch {} });
 
+  fetchPaths();
   updateButtons();
+
+  // Unregister any old service workers to prevent cached heavy sandbox
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.getRegistrations().then(regs => {
+      for (const reg of regs) reg.unregister();
+    });
+  }
 })();
 </script>
 </body>

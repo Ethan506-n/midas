@@ -4,8 +4,10 @@ import zlib from 'zlib';
 import { URL } from 'url';
 import { getEndpointPaths, matchPolymorphicPath } from './polymorph-router.js';
 import { wsBridgeHandler } from './ws-bridge.js';
-import { isCaptchaUrl, buildPassthroughHeaders } from './captcha-handler.js';
+import { isCaptchaUrl, isCaptchaHtml, buildPassthroughHeaders } from './captcha-handler.js';
 
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50, maxFreeSockets: 10, timeout: 30000, freeSocketTimeout: 30000 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50, maxFreeSockets: 10, timeout: 30000, freeSocketTimeout: 30000 });
 const ACTIVE_TRANSPORTS = new Map();
 const COOKIE_JAR = new Map();
 
@@ -84,59 +86,8 @@ function rewriteCss(css, baseUrl) {
   return css;
 }
 
-function getStealthScript(baseProxyUrl) {
-  const nonce = Math.random().toString(36).slice(2, 10);
-  const script = [
-    '<script data-midas="' + nonce + '">',
-    '(function(){',
-    'var base="' + baseProxyUrl + '";',
-    'function px(u){',
-    'if(!u||typeof u!=="string")return u;',
-    'if(u.indexOf("/_midas/")>=0)return u;',
-    'if(/^#|^(javascript|data|blob|mailto|tel|about|ws|wss):/i.test(u))return u;',
-    'try{var a=document.createElement("a");a.href=u;return base+"?url="+encodeURIComponent(a.href);}catch(e){return u;}',
-    '}',
-    'function patch(el){',
-    'if(!el||el.nodeType!==1)return;',
-    'var t=el.tagName;if(!t)return;',
-    'var tag=t.toLowerCase();',
-    'if(tag==="a"){var h=el.getAttribute("href");if(h&&h[0]!=="#")el.setAttribute("href",px(h));}',
-    'else if(tag==="form"){var a=el.getAttribute("action");if(a)el.setAttribute("action",px(a));}',
-    'else if(tag==="img"||tag==="source"||tag==="track"){var s=el.getAttribute("src");if(s)el.setAttribute("src",px(s));var ss=el.getAttribute("srcset");if(ss)el.setAttribute("srcset",ss.split(",").map(function(p){var x=p.trim().split(/\\s+/);x[0]=px(x[0]);return x.join(" ");}).join(", "));}',
-    'else if(tag==="link"){var h=el.getAttribute("href");if(h)el.setAttribute("href",px(h));}',
-    'else if(tag==="script"){var s=el.getAttribute("src");if(s)el.setAttribute("src",px(s));el.removeAttribute("integrity");el.removeAttribute("crossorigin");}',
-    'else if(tag==="iframe"||tag==="embed"||tag==="object"){var s=el.getAttribute("src")||el.getAttribute("data");if(s){var r=px(s);if(el.hasAttribute("src"))el.setAttribute("src",r);if(el.hasAttribute("data"))el.setAttribute("data",r);}}',
-    'else if(tag==="meta"){var c=el.getAttribute("content");if(c&&/url\\s*=/i.test(c)){var m=c.match(/(.*url\\s*=\\s*)(.+?)(\\s*;.*|$)/i);if(m)el.setAttribute("content",m[1]+px(m[2])+m[3]);}}',
-    'else if(tag==="video"||tag==="audio"){var s=el.getAttribute("src");if(s)el.setAttribute("src",px(s));var ps=el.querySelectorAll("source");for(var i=0;i<ps.length;i++)patch(ps[i]);}',
-    '}',
-    'function patchAll(root){if(!root)return;var els=root.querySelectorAll?root.querySelectorAll("a,form,img,source,track,link,script,iframe,embed,object,meta,video,audio"):[];for(var i=0;i<els.length;i++)patch(els[i]);}',
-    'var obs=new MutationObserver(function(ms){for(var i=0;i<ms.length;i++){var ml=ms[i].addedNodes;for(var j=0;j<ml.length;j++){var n=ml[j];if(n.nodeType===1){patch(n);patchAll(n);}}}});',
-    'if(document.documentElement){obs.observe(document.documentElement,{childList:true,subtree:true});patchAll(document.body||document.documentElement);}else{document.addEventListener("DOMContentLoaded",function(){obs.observe(document.documentElement,{childList:true,subtree:true});patchAll(document.body);});}',
-    'document.addEventListener("click",function(e){var t=e.target;while(t&&t.tagName!=="A")t=t.parentNode;if(!t)return;var h=t.getAttribute("href");if(!h||h[0]==="#"||/^(javascript|data|mailto|tel):/i.test(h))return;var p=px(h);if(p!==h)t.setAttribute("href",p);if(t.getAttribute("target")==="_blank")return;e.preventDefault();window.location.href=p;},true);',
-    'document.addEventListener("submit",function(e){var f=e.target;if(f.tagName!=="FORM")return;var a=f.getAttribute("action");if(!a){a=window.location.href;}var p=px(a);if(p!==a)f.setAttribute("action",p);f.setAttribute("target","_self");},true);',
-    'var origOpen=window.open;',
-    'window.open=function(url,target,features){',
-    'if(url&&typeof url==="string"&&!url.includes("/_midas/")){url=px(url);}',
-    'return origOpen.call(this,url,target,features);',
-    '};',
-    'var origFetch=window.fetch;',
-    'window.fetch=function(input,init){',
-    'if(typeof input==="string"){input=px(input);}',
-    'else if(input&&input.url){input.url=px(input.url);}',
-    'return origFetch(input,init);',
-    '};',
-    'var origXHR=window.XMLHttpRequest;',
-    'window.XMLHttpRequest=function(){var x=new origXHR();var origOpen=x.open;x.open=function(method,url,async,user,password){if(typeof url==="string"){url=px(url);}return origOpen.call(x,method,url,async,user,password);};return x;};',
-    'var origWS=window.WebSocket;',
-    'window.WebSocket=function(url,protocols){if(typeof url==="string"&&url.indexOf("/_midas/")<0){url=px(url.replace(/^wss?/,"https"));}return new origWS(url,protocols);};',
-    'var origES=window.EventSource;',
-    'if(origES){window.EventSource=function(url,options){if(typeof url==="string"){url=px(url);}return new origES(url,options);};}',
-    'var origSendBeacon=navigator.sendBeacon;',
-    'if(origSendBeacon){navigator.sendBeacon=function(url,data){if(typeof url==="string"){url=px(url);}return origSendBeacon.call(navigator,url,data);};}',
-    '})();',
-    '</script>'
-  ];
-  return script.join('');
+function getStealthScript(baseProxyUrl, baseUrl) {
+  return '<script src="/sandbox.js" data-base="' + (baseUrl || '') + '"></script>';
 }
 
 function rewriteHtml(html, baseUrl, baseProxyUrl) {
@@ -189,13 +140,16 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
     return 'url("' + toProxyUrl(abs) + '")';
   });
 
-  const stealthScript = getStealthScript(baseProxyUrl);
-  if (html.includes('</head>')) {
-    html = html.replace('</head>', stealthScript + '</head>');
-  } else if (html.includes('</body>')) {
-    html = html.replace('</body>', stealthScript + '</body>');
-  } else {
-    html += stealthScript;
+  const isChallengePage = isCaptchaHtml(html);
+  if (!isChallengePage) {
+    const stealthScript = getStealthScript(baseProxyUrl, baseUrl);
+    if (html.includes('</head>')) {
+      html = html.replace('</head>', stealthScript + '</head>');
+    } else if (html.includes('</body>')) {
+      html = html.replace('</body>', stealthScript + '</body>');
+    } else {
+      html += stealthScript;
+    }
   }
 
   return html;
@@ -210,9 +164,9 @@ function rewriteJs(js, baseUrl) {
     if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
     return "'" + toProxyUrl(u) + "'";
   });
-  js = js.replace(/\\x60(https?:\/\/[^\\x60]+)\\x60/g, (m, u) => {
+  js = js.replace(/\x60(https?:\/\/[^\x60]+)\x60/g, (m, u) => {
     if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
-    return '\\x60' + toProxyUrl(u) + '\\x60';
+    return '\x60' + toProxyUrl(u) + '\x60';
   });
   js = js.replace(/\bimport\s*\(\s*['"](https?:\/\/[^'"]+)['"]\s*\)/g, (m, u) => {
     if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;

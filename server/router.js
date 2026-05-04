@@ -416,6 +416,17 @@ function rewriteJs(js, baseUrl) {
   // ES module static imports: import ... from "url"
   js = rewriteModuleImports(js, baseUrl);
 
+  // Rewrite webpack public path (r.p / __webpack_require__.p / __webpack_public_path__)
+  // Fixes Next.js / webpack5 dynamic chunk loading where chunks use relative paths like /_next/
+  // We use a non-encoded proxy prefix so webpack can safely append chunk filenames via string concat.
+  js = js.replace(/\b(\w+\.p)\s*=\s*"(\/[^"]{0,120}\/)"(?!\s*\+)/g, (m, ref, path) => {
+    if (isAlreadyProxied(path)) return m;
+    const abs = resolveUrl(baseUrl, path);
+    if (!abs) return m;
+    // Build prefix without encoding so "prefix" + "static/chunks/foo.js" resolves correctly
+    return ref + '="/_midas/' + currentPaths.browse + '?url=' + abs + '"';
+  });
+
   return js;
 }
 
@@ -966,6 +977,33 @@ export function router(req, res, url) {
       }
     });
     return;
+  }
+
+  // ── Referer-based fallback proxy ─────────────────────────────────────────
+  // When a proxied SPA (Next.js /_next/, Vite /assets/, Nuxt /_nuxt/, CRA /static/, etc.)
+  // dynamically loads resources using same-origin relative paths, those requests hit our
+  // server instead of the target site. We recover by using the Referer header to determine
+  // the target origin and transparently proxy the request there.
+  {
+    const referer = req.headers['referer'] || req.headers['referrer'] || '';
+    if (referer) {
+      const refMatch = referer.match(/\/_midas\/[^?#]+\?(?:[^&]*&)*url=([^&\s#]+)/);
+      if (refMatch) {
+        try {
+          const targetOrigin = new URL(decodeURIComponent(refMatch[1])).origin;
+          const reqUrl = new URL(req.url, 'http://x');
+          // Only proxy non-midas, non-sandbox paths
+          if (!reqUrl.pathname.startsWith('/_midas/') &&
+              reqUrl.pathname !== '/sandbox.js' &&
+              reqUrl.pathname !== '/demo.html') {
+            const targetUrl = targetOrigin + req.url;
+            setCors(res);
+            browseHandler(req, res, targetUrl);
+            return;
+          }
+        } catch (e) { /* fall through to 404 */ }
+      }
+    }
   }
 
   res.writeHead(404); res.end();

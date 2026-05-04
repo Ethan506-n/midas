@@ -270,10 +270,16 @@ function handler(req, res) {
   }
 
   const staticFiles = ['/sw.js', '/loader.js', '/midas.client.js', '/manifest.json', '/demo.html', '/index.html'];
-  const isStatic = staticFiles.includes(url.pathname) || url.pathname.match(/\.(js|html|css|json|wasm|png|jpg|svg|ico)$/);
-  if (isStatic) {
-    serveStatic(req, res, url.pathname);
-    return;
+  const isStaticCandidate = staticFiles.includes(url.pathname) || url.pathname.match(/\.(js|html|css|json|wasm|png|jpg|svg|ico)$/);
+  if (isStaticCandidate) {
+    // Only serve as static if the file actually exists in public/
+    // Otherwise fall through to router (referer-based fallback handles SPA dynamic imports)
+    const safePath = path.normalize(url.pathname).replace(/^(\.\.(\/|\\|$))+/, '');
+    const filePath = path.join(PUBLIC, safePath);
+    if (filePath.startsWith(PUBLIC) && fs.existsSync(filePath) && !fs.statSync(filePath).isDirectory()) {
+      serveStatic(req, res, url.pathname);
+      return;
+    }
   }
 
   if (url.pathname === '/') {

@@ -24,7 +24,11 @@
   // ── helpers ──────────────────────────────────────────────────────────────
 
   function toProxy(url) {
-    if (!url || typeof url !== 'string') return url;
+    if (!url) return url;
+    // Handle TrustedScriptURL and other non-string URL-like objects (Trusted Types API)
+    if (typeof url !== 'string') {
+      url = (url.toString ? url.toString() : String(url));
+    }
     url = url.trim();
     if (!url) return url;
     if (url.indexOf('data:') === 0) return url;
@@ -45,12 +49,12 @@
     } catch (e) { return url; }
   }
 
-  function isAbsolute(url) {
-    return /^https?:\/\//i.test(url);
-  }
-
   function shouldProxy(url) {
-    if (!url || typeof url !== 'string') return false;
+    if (!url) return false;
+    // Handle TrustedScriptURL and other non-string URL-like objects
+    if (typeof url !== 'string') {
+      url = (url.toString ? url.toString() : String(url));
+    }
     if (url.indexOf('/_midas/') !== -1) return false;
     if (url.indexOf('data:') === 0) return false;
     if (url.indexOf('blob:') === 0) return false;
@@ -66,6 +70,56 @@
       return true;
     } catch (e) { return false; }
   }
+
+  // ── Prototype-level src/href interceptors ─────────────────────────────────
+  // These intercept ALL src/href assignments at the prototype level, catching
+  // webpack chunk loaders (u.src = chunkUrl), dynamic link insertions, etc.
+  // This is more reliable than per-instance Object.defineProperty.
+
+  try {
+    var _scrSrcDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
+    if (_scrSrcDesc && _scrSrcDesc.set) {
+      Object.defineProperty(HTMLScriptElement.prototype, 'src', {
+        get: _scrSrcDesc.get,
+        set: function (v) {
+          var url = (v && typeof v === 'object' && v.toString) ? v.toString() : String(v || '');
+          if (url && shouldProxy(url)) url = toProxy(url);
+          _scrSrcDesc.set.call(this, url);
+        },
+        configurable: true,
+      });
+    }
+  } catch (e) {}
+
+  try {
+    var _lnkHrefDesc = Object.getOwnPropertyDescriptor(HTMLLinkElement.prototype, 'href');
+    if (_lnkHrefDesc && _lnkHrefDesc.set) {
+      Object.defineProperty(HTMLLinkElement.prototype, 'href', {
+        get: _lnkHrefDesc.get,
+        set: function (v) {
+          var url = (v && typeof v === 'object' && v.toString) ? v.toString() : String(v || '');
+          if (url && shouldProxy(url)) url = toProxy(url);
+          _lnkHrefDesc.set.call(this, url);
+        },
+        configurable: true,
+      });
+    }
+  } catch (e) {}
+
+  try {
+    var _imgSrcDesc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+    if (_imgSrcDesc && _imgSrcDesc.set) {
+      Object.defineProperty(HTMLImageElement.prototype, 'src', {
+        get: _imgSrcDesc.get,
+        set: function (v) {
+          var url = (v && typeof v === 'object' && v.toString) ? v.toString() : String(v || '');
+          if (url && shouldProxy(url)) url = toProxy(url);
+          _imgSrcDesc.set.call(this, url);
+        },
+        configurable: true,
+      });
+    }
+  } catch (e) {}
 
   // ── DOM patching ──────────────────────────────────────────────────────────
 
@@ -93,6 +147,20 @@
     if (!node || node.nodeType !== 1) return;
     if (node.tagName === 'A') patchAnchor(node);
     if (node.tagName === 'FORM') patchForm(node);
+    // Patch SCRIPT src (MutationObserver backup for dynamically set src attributes)
+    if (node.tagName === 'SCRIPT') {
+      var scriptSrc = node.getAttribute('src');
+      if (scriptSrc && scriptSrc.indexOf('/_midas/') === -1 && scriptSrc.indexOf('data:') !== 0 && scriptSrc.indexOf('blob:') !== 0) {
+        if (shouldProxy(scriptSrc)) node.setAttribute('src', toProxy(scriptSrc));
+      }
+    }
+    // Patch LINK href (stylesheets, preloads, modulepreloads)
+    if (node.tagName === 'LINK') {
+      var linkHref = node.getAttribute('href');
+      if (linkHref && linkHref.indexOf('/_midas/') === -1 && linkHref.indexOf('data:') !== 0) {
+        if (shouldProxy(linkHref)) node.setAttribute('href', toProxy(linkHref));
+      }
+    }
     if (node.tagName === 'IMG' || node.tagName === 'VIDEO' || node.tagName === 'AUDIO' || node.tagName === 'SOURCE') {
       var src = node.getAttribute('src');
       if (src && src.indexOf('/_midas/') === -1 && src.indexOf('data:') !== 0 && src.indexOf('blob:') !== 0) {
@@ -267,8 +335,6 @@
       if (shouldProxy(httpUrl)) {
         var proxied = toProxy(httpUrl);
         // Convert back to ws:// via the proxy path (handled by ws-bridge on server)
-        // We'll use the HTTP polling bridge instead by connecting to the proxied HTTP URL
-        // as a WebSocket through the server's ws-bridge
         url = proxied.replace(/^https?:/, location.protocol).replace(location.host, location.host);
       }
     } catch (e) {}
@@ -301,64 +367,21 @@
   }
 
   // ── document.createElement interception ──────────────────────────────────
+  // Belt-and-suspenders: the prototype-level interceptors above are the primary
+  // defense; this catches any remaining cases where src is set via setAttribute.
 
   var _origCreateElement = document.createElement.bind(document);
   document.createElement = function (tag) {
     var el = _origCreateElement(tag);
     var tagLower = (tag || '').toLowerCase();
-    if (tagLower === 'script') {
-      // Intercept src assignment via Object.defineProperty
-      var _scriptSrc = '';
-      try {
-        Object.defineProperty(el, 'src', {
-          get: function () { return _scriptSrc; },
-          set: function (v) {
-            _scriptSrc = v;
-            if (v && shouldProxy(v)) {
-              Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'src') ||
-              Object.getOwnPropertyDescriptor(Element.prototype, 'src');
-              el.setAttribute('src', toProxy(v));
-            } else {
-              el.setAttribute('src', v);
-            }
-          },
-          configurable: true,
-        });
-      } catch (e) {}
-    }
-    if (tagLower === 'link') {
-      var _linkHref = '';
-      try {
-        Object.defineProperty(el, 'href', {
-          get: function () { return _linkHref; },
-          set: function (v) {
-            _linkHref = v;
-            if (v && shouldProxy(v)) {
-              el.setAttribute('href', toProxy(v));
-            } else {
-              el.setAttribute('href', v);
-            }
-          },
-          configurable: true,
-        });
-      } catch (e) {}
-    }
-    if (tagLower === 'img' || tagLower === 'iframe' || tagLower === 'video' || tagLower === 'audio') {
-      var _mediaSrc = '';
-      try {
-        Object.defineProperty(el, 'src', {
-          get: function () { return _mediaSrc; },
-          set: function (v) {
-            _mediaSrc = v;
-            if (v && shouldProxy(v)) {
-              el.setAttribute('src', toProxy(v));
-            } else {
-              el.setAttribute('src', v);
-            }
-          },
-          configurable: true,
-        });
-      } catch (e) {}
+    if (tagLower === 'script' || tagLower === 'link' || tagLower === 'img' || tagLower === 'iframe' || tagLower === 'video' || tagLower === 'audio') {
+      var _origSetAttr = el.setAttribute.bind(el);
+      el.setAttribute = function (name, val) {
+        if ((name === 'src' || name === 'href') && val && shouldProxy(val)) {
+          val = toProxy(val);
+        }
+        return _origSetAttr(name, val);
+      };
     }
     return el;
   };

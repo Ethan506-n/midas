@@ -177,6 +177,14 @@
         }).join(', ');
         node.setAttribute('srcset', newSrcset);
       }
+      // Handle lazy-load data-src / data-original / data-lazy-src attributes
+      var lazyAttrs = ['data-src', 'data-href', 'data-lazy-src', 'data-original', 'data-url', 'data-bg', 'data-background', 'data-lazy'];
+      for (var la = 0; la < lazyAttrs.length; la++) {
+        var lazyVal = node.getAttribute(lazyAttrs[la]);
+        if (lazyVal && lazyVal.indexOf('/_midas/') === -1 && lazyVal.indexOf('data:') !== 0 && lazyVal.indexOf('blob:') !== 0) {
+          if (shouldProxy(lazyVal)) node.setAttribute(lazyAttrs[la], toProxy(lazyVal));
+        }
+      }
     }
     if (node.querySelectorAll) {
       var anchors = node.querySelectorAll('a[href]:not([data-midas-orig])');
@@ -385,6 +393,125 @@
     }
     return el;
   };
+
+  // ── Service Worker blocking ───────────────────────────────────────────────
+  // Prevent sites from registering a SW at the proxy origin — it would intercept
+  // our own proxy requests and break navigation. We block register() entirely.
+  try {
+    if (navigator.serviceWorker) {
+      Object.defineProperty(navigator, 'serviceWorker', {
+        get: function () {
+          return {
+            register: function () { return Promise.reject(new Error('SW blocked by proxy')); },
+            getRegistrations: function () { return Promise.resolve([]); },
+            ready: new Promise(function () {}),
+            controller: null,
+            addEventListener: function () {},
+            removeEventListener: function () {},
+          };
+        },
+        configurable: true,
+      });
+    }
+  } catch (e) {
+    try {
+      navigator.serviceWorker.register = function () {
+        return Promise.reject(new Error('SW blocked by proxy'));
+      };
+    } catch (e2) {}
+  }
+
+  // Deregister any already-registered service workers from previous sessions
+  try {
+    if (window.navigator && window.navigator.serviceWorker && window.navigator.serviceWorker.getRegistrations) {
+      window.navigator.serviceWorker.getRegistrations().then(function (regs) {
+        for (var i = 0; i < regs.length; i++) regs[i].unregister();
+      }).catch(function () {});
+    }
+  } catch (e) {}
+
+  // ── Worker / SharedWorker URL proxying ────────────────────────────────────
+
+  try {
+    var _OrigWorker = window.Worker;
+    window.Worker = function (scriptURL, options) {
+      try { if (scriptURL && shouldProxy(scriptURL)) scriptURL = toProxy(scriptURL); } catch (e) {}
+      return options !== undefined ? new _OrigWorker(scriptURL, options) : new _OrigWorker(scriptURL);
+    };
+    window.Worker.prototype = _OrigWorker.prototype;
+  } catch (e) {}
+
+  try {
+    if (window.SharedWorker) {
+      var _OrigSharedWorker = window.SharedWorker;
+      window.SharedWorker = function (scriptURL, options) {
+        try { if (scriptURL && shouldProxy(scriptURL)) scriptURL = toProxy(scriptURL); } catch (e) {}
+        return options !== undefined ? new _OrigSharedWorker(scriptURL, options) : new _OrigSharedWorker(scriptURL);
+      };
+      window.SharedWorker.prototype = _OrigSharedWorker.prototype;
+    }
+  } catch (e) {}
+
+  // ── innerHTML / insertAdjacentHTML interception ───────────────────────────
+  // When sites inject HTML dynamically the server-side rewriter can't touch it.
+  // After the set, run patchNode on the changed subtree to fix URLs.
+
+  try {
+    var _innerHTMLDesc = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+    if (_innerHTMLDesc && _innerHTMLDesc.set) {
+      Object.defineProperty(Element.prototype, 'innerHTML', {
+        get: _innerHTMLDesc.get,
+        set: function (v) {
+          _innerHTMLDesc.set.call(this, v);
+          try { patchNode(this); } catch (e) {}
+        },
+        configurable: true,
+      });
+    }
+  } catch (e) {}
+
+  try {
+    var _origInsertAdjacentHTML = Element.prototype.insertAdjacentHTML;
+    Element.prototype.insertAdjacentHTML = function (position, html) {
+      _origInsertAdjacentHTML.call(this, position, html);
+      try { patchNode(this); } catch (e) {}
+    };
+  } catch (e) {}
+
+  try {
+    var _outerHTMLDesc = Object.getOwnPropertyDescriptor(Element.prototype, 'outerHTML');
+    if (_outerHTMLDesc && _outerHTMLDesc.set) {
+      Object.defineProperty(Element.prototype, 'outerHTML', {
+        get: _outerHTMLDesc.get,
+        set: function (v) {
+          _outerHTMLDesc.set.call(this, v);
+          try { if (this.parentNode) patchNode(this.parentNode); } catch (e) {}
+        },
+        configurable: true,
+      });
+    }
+  } catch (e) {}
+
+  // ── document.write interception ───────────────────────────────────────────
+
+  try {
+    var _origDocWrite = document.write.bind(document);
+    document.write = function (markup) {
+      return _origDocWrite(markup);
+    };
+  } catch (e) {}
+
+  // ── document.domain no-op ─────────────────────────────────────────────────
+  // Some sites set document.domain for same-origin relaxation; ignore safely.
+  try {
+    Object.defineProperty(document, 'domain', {
+      get: function () {
+        try { return new URL(BASE_URL || location.href).hostname; } catch (e) { return location.hostname; }
+      },
+      set: function () {},
+      configurable: true,
+    });
+  } catch (e) {}
 
   // ── import() dynamic interception ─────────────────────────────────────────
   // Note: true dynamic import() cannot be overridden at runtime without a SW.

@@ -162,6 +162,30 @@ function rewriteImportMap(json, baseUrl) {
   }
 }
 
+function rewriteJsonLd(json, baseUrl) {
+  try {
+    const data = JSON.parse(json);
+    function rewrite(obj) {
+      if (!obj) return obj;
+      if (typeof obj === 'string') {
+        if (/^https?:\/\//i.test(obj) && !isAlreadyProxied(obj) && !isCaptchaUrl(obj)) {
+          const abs = resolveUrl(baseUrl, obj);
+          return abs ? toProxyUrl(abs) : obj;
+        }
+        return obj;
+      }
+      if (Array.isArray(obj)) return obj.map(rewrite);
+      if (typeof obj === 'object') {
+        const out = {};
+        for (const [k, v] of Object.entries(obj)) out[k] = rewrite(v);
+        return out;
+      }
+      return obj;
+    }
+    return JSON.stringify(rewrite(data));
+  } catch { return json; }
+}
+
 function rewriteHtml(html, baseUrl, baseProxyUrl) {
   // Remove <base> tags (we handle base URL ourselves)
   html = html.replace(/<base\b[^>]*>/gi, '');
@@ -176,6 +200,13 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
   html = html.replace(/\s+crossorigin\s*=\s*("([^"]*)"|'([^']*)')/gi, '');
   html = html.replace(/\s+crossorigin(?=[\s>\/])/gi, '');
 
+  // Strip inline CSP meta tags (we strip headers but inline meta CSP also blocks scripts)
+  html = html.replace(/<meta\b[^>]*\bhttp-equiv\s*=\s*["']?content-security-policy["']?[^>]*>/gi, '');
+  html = html.replace(/<meta\b[^>]*\bhttp-equiv\s*=\s*["']?content-security-policy-report-only["']?[^>]*>/gi, '');
+
+  // Remove preconnect/dns-prefetch links (they leak real domain names to the browser)
+  html = html.replace(/<link\b[^>]*\brel\s*=\s*["'](?:preconnect|dns-prefetch)["'][^>]*>/gi, '');
+
   // Rewrite inline <style> blocks
   html = html.replace(/(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi,
     (_m, open, body, close) => open + rewriteCss(body, baseUrl) + close);
@@ -187,6 +218,10 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
   // Rewrite inline <script type="module"> imports
   html = html.replace(/(<script\b[^>]*type\s*=\s*["']module["'][^>]*>)([\s\S]*?)(<\/script>)/gi,
     (_m, open, body, close) => open + rewriteModuleImports(rewriteJs(body, baseUrl), baseUrl) + close);
+
+  // Rewrite JSON-LD structured data (<script type="application/ld+json">)
+  html = html.replace(/(<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>)([\s\S]*?)(<\/script>)/gi,
+    (_m, open, body, close) => open + rewriteJsonLd(body.trim(), baseUrl) + close);
 
   // Rewrite inline <script> (non-module) blocks
   html = html.replace(/(<script\b(?![^>]*type\s*=\s*["'](?:module|importmap|text\/template|text\/html|application\/(?:json|ld\+json))["'])[^>]*>)([\s\S]*?)(<\/script>)/gi,
@@ -216,6 +251,16 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
       return attr + '="' + toProxyUrl(abs) + '"';
     }
   );
+
+  // Rewrite data-src / data-href / data-lazy-src / data-original (lazy-load attributes)
+  html = html.replace(/\b(data-src|data-href|data-lazy-src|data-original|data-url|data-bg|data-background|data-lazy)\s*=\s*("([^"]*)"|'([^']*)')/gi,
+    (m, attr, _all, dq, sq) => {
+      const v = (dq ?? sq ?? '').trim();
+      if (!v || /^(data:|blob:|#|javascript:)/i.test(v) || isAlreadyProxied(v)) return m;
+      const abs = resolveUrl(baseUrl, v);
+      if (!abs) return m;
+      return attr + '="' + toProxyUrl(abs) + '"';
+    });
 
   // Rewrite srcset attributes
   html = html.replace(/\bsrcset\s*=\s*("([^"]*)"|'([^']*)')/gi, (m, _all, dq, sq) => {
@@ -293,24 +338,25 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
 
 function rewriteJs(js, baseUrl) {
   // Absolute URL strings in double quotes
-  js = js.replace(/"(https?:\/\/[^"\s]{3,})"/g, (m, u) => {
+  // Use (?<!\\) lookbehind to avoid matching JSON-escaped \"url\" sequences (prevents %5C corruption)
+  // Use [^"\\\s] to also exclude backslash from URL content
+  js = js.replace(/(?<!\\)"(https?:\/\/[^"\\\s]{3,})(?<!\\)"/g, (m, u) => {
     if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
-    // Avoid rewriting inside comments (best-effort; not a full parser)
     return '"' + toProxyUrl(u) + '"';
   });
   // Absolute URL strings in single quotes
-  js = js.replace(/'(https?:\/\/[^'\s]{3,})'/g, (m, u) => {
+  js = js.replace(/(?<!\\)'(https?:\/\/[^'\\\s]{3,})(?<!\\)'/g, (m, u) => {
     if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
     return "'" + toProxyUrl(u) + "'";
   });
   // Absolute URL template literals (simple, no expressions)
-  js = js.replace(/`(https?:\/\/[^`$\s]{3,})`/g, (m, u) => {
+  js = js.replace(/`(https?:\/\/[^`$\\\s]{3,})`/g, (m, u) => {
     if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
     return '`' + toProxyUrl(u) + '`';
   });
 
   // Protocol-relative URLs
-  js = js.replace(/"(\/\/[^"\/\s][^"\s]{2,})"/g, (m, u) => {
+  js = js.replace(/(?<!\\)"(\/\/[^"\/\\\s][^"\\\s]{2,})(?<!\\)"/g, (m, u) => {
     if (isAlreadyProxied(u)) return m;
     const abs = 'https:' + u;
     if (isCaptchaUrl(abs)) return m;
@@ -409,6 +455,33 @@ function rewriteJs(js, baseUrl) {
       const abs = resolveUrl(baseUrl, u);
       if (!abs) return m;
       return 'import("' + toProxyUrl(abs) + '")';
+    }
+    return m;
+  });
+
+  // importScripts("url") — used in web workers
+  js = js.replace(/\bimportScripts\s*\(\s*((?:"[^"]+"|'[^']+')\s*(?:,\s*(?:"[^"]+"|'[^']+')\s*)*)\)/g, (m, args) => {
+    const rewritten = args.replace(/"([^"]+)"|'([^']+)'/g, (_q, dq, sq) => {
+      const u = (dq ?? sq ?? '').trim();
+      if (!u || isAlreadyProxied(u) || isCaptchaUrl(u)) return _q;
+      if (/^https?:\/\//i.test(u) || u.startsWith('//') || u.startsWith('/')) {
+        const abs = resolveUrl(baseUrl, u);
+        if (!abs) return _q;
+        return '"' + toProxyUrl(abs) + '"';
+      }
+      return _q;
+    });
+    return 'importScripts(' + rewritten + ')';
+  });
+
+  // new Worker("url") / new SharedWorker("url") — proxy the worker script
+  js = js.replace(/\bnew\s+(Worker|SharedWorker)\s*\(\s*("([^"]+)"|'([^']+)')/g, (m, cls, _q, dq, sq) => {
+    const u = (dq ?? sq ?? '').trim();
+    if (!u || isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
+    if (/^https?:\/\//i.test(u) || u.startsWith('//') || u.startsWith('/')) {
+      const abs = resolveUrl(baseUrl, u);
+      if (!abs) return m;
+      return 'new ' + cls + '("' + toProxyUrl(abs) + '"';
     }
     return m;
   });
@@ -778,7 +851,7 @@ function browseHandler(req, res, targetUrl, depth = 0) {
           // Preserve original content-type so browsers parse as module if needed
           outHeaders['content-type'] = ct.includes('module') ? 'application/javascript; charset=utf-8' : (ct || 'application/javascript; charset=utf-8');
         } else if (isJson) {
-          out = text.replace(/"(https?:\/\/[^"]+)"/g, (m, u) => {
+          out = text.replace(/(?<!\\)"(https?:\/\/[^"\\]+)(?<!\\)"/g, (m, u) => {
             if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
             return '"' + toProxyUrl(u) + '"';
           });

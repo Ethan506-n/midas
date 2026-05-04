@@ -1,120 +1,126 @@
-# Midas Proxy Engine — replit.md
+# Midas Proxy Engine
 
 ## Overview
+An advanced web proxy engine that routes external websites through the server, rewriting HTML/CSS/JS/JSON on the fly to keep all resource URLs within the proxy. Uses polymorphic rotating endpoint paths to avoid static-signature detection.
 
-Midas is an advanced web proxy engine built to bypass modern content-filtering and deep packet inspection systems (such as Lightspeed Live Intelligence). It routes web traffic through a Node.js server, rewriting HTML/CSS/JS on the fly and serving a client-side engine that hooks browser APIs to make proxied pages behave as if they were loaded natively.
+## Tech Stack
+- **Runtime**: Node.js 18+ (ESM modules)
+- **Backend**: Pure Node.js `http`, `https`, `zlib` — no framework
+- **WebSocket**: `ws` library for real bidirectional WS tunneling
+- **Frontend**: Vanilla JS served as static files from `public/`
+- **Build**: Custom TypeScript build pipeline (`scripts/build.js` → `public/`)
 
-Key capabilities:
-- Polymorphic endpoint paths that rotate every 5 minutes via HMAC-derived names
-- Server-side HTML/CSS/JS rewriting with client-side MutationObserver patching
-- WebSocket tunneling over standard HTTP (avoids WS signature detection)
-- Stealth Service Worker disguised as a PWA cache worker
-- CAPTCHA passthrough for reCAPTCHA, hCaptcha, and Cloudflare Turnstile
-- Anti-fingerprinting for canvas, WebGL, audio, navigator, and screen APIs
-- Traffic noise injection (decoy requests, random padding) to defeat pattern analysis
+## Architecture
 
----
+### Server (`server/`)
+| File | Purpose |
+|------|---------|
+| `index.js` | HTTP/1.1 server entry point, port 5000 |
+| `router.js` | Core proxy logic — HTML/CSS/JS rewriting, cookie jar, browseHandler |
+| `polymorph-router.js` | Rotating endpoint paths (HMAC-derived, change every 5 min) |
+| `ws-bridge.js` | WebSocket ↔ HTTP polling bridge |
+| `captcha-handler.js` | CAPTCHA passthrough detection |
+| `passthrough.js` | Header passthrough helpers |
 
-## User Preferences
+### Public (`public/`)
+| File | Purpose |
+|------|---------|
+| `demo.html` | Main browser UI (toolbar, iframe, search engine selector) |
+| `sandbox.js` | Client-side hook — intercepts fetch, XHR, WS, navigation, DOM |
+| `loader.js` | SW bootstrap and client bundle loader |
+| `sw.js` | Service worker (cache + proxy route interception) |
+| `midas.client.js` | Compiled TS client bundle (anti-detection, transport) |
+| `manifest.json` | PWA manifest |
 
-Preferred communication style: Simple, everyday language.
+### TypeScript Source (`src/`)
+Client-side TypeScript compiled via `scripts/build.js` into `public/midas.client.js`:
+- `core/` — transport (SSE/chunked), binary encoding, WebSocket hooks, noise
+- `cloak/` — anti-instrumentation, fingerprint evasion
+- `dom/` — window.location, localStorage, DOM virtualization
+- `sw/` — stealth service worker source
+- `captcha/` — CAPTCHA compatibility hooks
+- `sandbox/` — iframe interception
 
----
+## Key Features
 
-## System Architecture
+### HTML Rewriting (`router.js → rewriteHtml`)
+- Removes `<base>` tags
+- **Strips `integrity` (SRI) attributes** — prevents broken resources after rewriting
+- **Strips `nonce` attributes** — avoids CSP nonce mismatches
+- **Strips `crossorigin` attributes** — avoids CORS issues with rewritten origins
+- Rewrites all `href`, `src`, `action`, `formaction`, `poster`, `srcset` attributes
+- Rewrites inline `<style>` blocks and `style=""` attributes
+- Rewrites `<script type="module">` import/export statements
+- **Rewrites `<script type="importmap">`** — maps CDN imports through proxy
+- Rewrites meta refresh redirects
+- Rewrites `og:url`, `og:image`, `twitter:image` meta tags
+- Injects `sandbox.js` before `</head>` with correct `data-base` attribute
 
-### Server (Node.js, ESM)
+### JS Rewriting (`router.js → rewriteJs`)
+- Absolute URL strings (`"https://..."`, `'https://...'`, template literals)
+- Protocol-relative URLs (`//cdn.example.com/...`)
+- `fetch("url")` calls
+- `XMLHttpRequest.open("METHOD", "url")`
+- `navigator.sendBeacon("url")`
+- `new URL("url")`
+- `location.href = "url"`, `location.assign("url")`, `location.replace("url")`
+- `new WebSocket("wss://...")` → converted to HTTP and proxied
+- `new EventSource("url")`
+- `import("url")` dynamic imports
+- ES module `import ... from "url"` and `export ... from "url"`
 
-**Entry point**: `server/index.js`
-- Starts an HTTP server (HTTP/2 optional via `USE_HTTP2=true`)
-- Serves the built-in browser UI (address bar + iframe) directly from an inline HTML string
-- Delegates all requests to the router
+### CSS Rewriting (`router.js → rewriteCss`)
+- `url(...)` references
+- `@import url(...)` and `@import "..."`
 
-**Router**: `server/router.js`
-- Central request handler; routes traffic based on URL path prefixes
-- Maintains a `COOKIE_JAR` (in-memory `Map`) for session cookie persistence across proxy hops
-- Performs server-side HTML rewriting: rewrites `href`, `src`, `action`, `formaction`, `srcset`, etc. to go through the proxy
-- Handles compressed responses (gzip/br/deflate) via Node's `zlib`
-- Sets permissive CORS headers on all proxy responses
-- Refreshes polymorphic endpoint paths every 60 seconds
+### Content-Type Sniffing
+When servers return `application/octet-stream` or wrong types:
+- `.js`, `.mjs`, `.ts`, `.tsx`, `.jsx` → rewritten as JavaScript
+- `.css` → rewritten as CSS
+- `.html`, `.htm` → rewritten as HTML
 
-**Polymorphic router**: `server/polymorph-router.js`
-- Generates 8–10 character hex endpoint names via HMAC-SHA256 over a rotating random seed
-- Seed rotates every 5 minutes; old paths become invalid automatically
-- Eliminates static URL signatures like `/_uv/`, `/_bare/`, etc.
+### Client-Side Hooks (`public/sandbox.js`)
+Injected into every proxied HTML page:
+- `fetch()` — intercepts and proxies external fetch calls
+- `XMLHttpRequest.open()` — intercepts XHR
+- `navigator.sendBeacon()` — intercepts beacon calls
+- `new WebSocket()` — routes through proxy
+- `new EventSource()` — intercepts SSE
+- `document.createElement()` — patches script/link/img/iframe src on creation
+- `history.pushState/replaceState` — keeps navigation proxied
+- `window.open()` — proxied
+- `location.assign/replace` — proxied
+- Click/submit event fallback interceptors
+- MutationObserver for dynamically added DOM nodes
 
-**WebSocket bridge**: `server/ws-bridge.js`
-- Bridges WebSocket connections through HTTP using the `ws` npm package
-- Sessions stored in `BRIDGE_SESSIONS` (in-memory `Map`) with 5-minute idle timeout
-- Clients open/close/send/poll over regular HTTP endpoints; the server holds the real WS connection
+### Cookie Management
+Server-side cookie jar (`Map<sid → Map<host → Cookie[]>>`) stores cookies per session per host, correctly handles `domain`, `path`, `expires`, `max-age`, `secure` attributes.
 
-**CAPTCHA handler**: `server/captcha-handler.js` + `server/passthrough.js`
-- Detects CAPTCHA URLs by domain and path pattern matching
-- Routes them through a minimal passthrough that preserves `origin`, `referer`, cookies, and UA headers
-- Prevents CAPTCHA scripts from detecting they are being proxied
+### Session & Polymorphic Routing
+- Each page load gets a `midas_sid` cookie
+- Endpoint paths rotate every 5 minutes using HMAC-SHA256 derived paths
+- Client fetches `/` session endpoint to get current path map
 
-### Client Engine (TypeScript → bundled JS)
+## Configuration
+| Env Var | Default | Purpose |
+|---------|---------|---------|
+| `PORT` | `5000` | Server port |
+| `HOST` | `0.0.0.0` | Bind address |
+| `USE_HTTP2` | `false` | Enable HTTP/2 (requires TLS certs in `server/`) |
 
-Source lives in `src/`, compiled and bundled by `scripts/build.js` into `public/midas.client.js`.
+## Build
+```bash
+npm run build   # Compile TypeScript + bundle client
+npm start       # Start server
+npm run dev     # Build then start
+```
 
-**Core modules** (`src/core/`):
-- `encoder.ts` — Custom binary wire protocol (avoids base64/JSON signatures)
-- `crypto.ts` — XOR-based encryption with WASM-swap-ready architecture; JS fallback active
-- `transport.ts` — Multi-strategy transport (SSE → chunked fetch → plain fetch); uses dynamic polymorphic paths
-- `websocket.ts` — `MidasWebSocket` class emulating the native `WebSocket` API over HTTP polling
-- `noise.ts` — Periodic decoy requests to random-looking endpoints to break traffic pattern analysis
+## Workflow
+- **Start application**: `node server/index.js` on port 5000
+- Port 5000 maps to external port 80
 
-**DOM patching** (`src/dom/`):
-- `patch.ts` — `MutationObserver`-based lazy link rewriting; patches `<a>`, `<form>`, `<img>`, `<script>` as they appear
-- `window.ts` — Shadows `window.location` with a `Proxy` object returning the proxied page's URL values
-- `storage.ts` — Virtualizes `localStorage`/`sessionStorage` with per-origin key prefixing
-
-**Cloaking** (`src/cloak/`):
-- `detect.ts` — DevTools detection (window dimension heuristic) + instrumentation hook detection
-- `fingerprint.ts` — Adds pixel noise to canvas `getImageData`, patches WebGL, audio, navigator, and screen
-- `polymorph.ts` — Random identifier and string generators for runtime code variation
-
-**CAPTCHA compat** (`src/captcha/compat.ts`):
-- Intercepts `document.createElement('script')` to redirect CAPTCHA `src` values through the passthrough endpoint
-
-**Service Worker** (`src/sw/stealth-sw.ts` → `public/sw.js`):
-- Registers as a PWA-style cache worker (Workbox-like appearance)
-- Only intercepts requests on `/_midas/` routes or those carrying `x-midas-sid` headers
-- Pre-caches legitimate-looking assets as cover
-
-**Sandbox** (`src/sandbox/iframe.ts`):
-- Creates a sandboxed `<iframe>` via `Blob` URL for full page isolation
-- Two-way `postMessage` bridge between parent and iframe for navigation/title events
-
-### Build Pipeline
-
-`scripts/build.js` (plain Node.js):
-- Concatenates TypeScript source files (after stripping `import`/`export` syntax) into a single IIFE bundle
-- Outputs `public/midas.client.js` and `public/sw.js`
-- TypeScript is used for type-checking only (`noEmit: true`); bundling is custom, not tsc
-
-### Data Storage
-
-- **No database** — all state is in-memory (`Map` objects for cookie jar, WebSocket bridge sessions, transport registry)
-- Sessions are ephemeral; cookies survive only for the lifetime of the server process
-- Storage isolation for proxied origins is implemented client-side via prefixed localStorage keys
-
-### UI
-
-- Single-page browser UI served inline from `server/index.js`
-- Address bar, back/forward/reload buttons, search engine selector
-- Main content rendered in a full-viewport `<iframe>` pointed at the proxy
-- `public/demo.html` and `public/index.html` are alternative static UI variants
-
----
-
-## External Dependencies
-
-| Dependency | Purpose |
-|---|---|
-| `ws` (npm, ^8.16.0) | Real WebSocket client used server-side in `ws-bridge.js` to hold connections to target sites |
-| `typescript` (dev, ^5.3.3) | Type checking only; not used for bundling |
-| Node.js built-ins: `http`, `https`, `http2`, `zlib`, `crypto`, `fs`, `path` | Server infrastructure, compression, HMAC seed generation, file serving |
-| Web APIs: `fetch`, `ServiceWorker`, `MutationObserver`, `Proxy`, `SubtleCrypto`, `WebGL`, `AudioContext` | Client-side hooking and anti-fingerprinting |
-
-No external CDN dependencies, no database drivers, no authentication framework, no environment secrets required for basic operation. Port defaults to `5000`, configurable via `PORT` environment variable.
+## Preferences
+- Keep all server code as ESM (`"type": "module"` in package.json)
+- No framework dependencies — pure Node.js stdlib + `ws`
+- Rewrite content on the server side; use `sandbox.js` for dynamic client-side patching
+- Never add `integrity` or `nonce` attributes to injected scripts

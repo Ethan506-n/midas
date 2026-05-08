@@ -780,23 +780,6 @@ function browseHandler(req, res, targetUrl, depth = 0) {
     const charsetMatch = ct.match(/charset=([^\s;]+)/i);
     const charset = charsetMatch ? charsetMatch[1] : 'utf-8';
 
-    const outHeaders = { ...proxyRes.headers };
-    delete outHeaders['content-security-policy'];
-    delete outHeaders['content-security-policy-report-only'];
-    delete outHeaders['strict-transport-security'];
-    delete outHeaders['x-frame-options'];
-    delete outHeaders['content-length'];
-    delete outHeaders['content-encoding'];
-    delete outHeaders['transfer-encoding'];
-    delete outHeaders['set-cookie'];
-    delete outHeaders['alt-svc'];
-    delete outHeaders['cross-origin-opener-policy'];
-    delete outHeaders['cross-origin-embedder-policy'];
-    delete outHeaders['cross-origin-resource-policy'];
-    delete outHeaders['origin-agent-cluster'];
-    delete outHeaders['permissions-policy'];
-    outHeaders['cache-control'] = 'no-store';
-
     const enc = (proxyRes.headers['content-encoding'] || '').toLowerCase();
     let stream = proxyRes;
     if (enc === 'gzip') stream = proxyRes.pipe(zlib.createGunzip());
@@ -809,6 +792,38 @@ function browseHandler(req, res, targetUrl, depth = 0) {
     const isJson = ct.includes('application/json') || ct.includes('application/manifest+json') || ct.includes('application/ld+json');
     const isXml = ct.includes('application/xml') || ct.includes('text/xml') || ct.includes('application/rss') || ct.includes('application/atom');
     const isFormData = ct.includes('application/x-www-form-urlencoded');
+    const isImage = ct.startsWith('image/');
+
+    const outHeaders = { ...proxyRes.headers };
+    // Remove security headers that would interfere with proxied content
+    delete outHeaders['content-security-policy'];
+    delete outHeaders['content-security-policy-report-only'];
+    delete outHeaders['strict-transport-security'];
+    delete outHeaders['x-frame-options'];
+    delete outHeaders['set-cookie'];
+    // Remove policies that interfere with cross-origin proxy delivery
+    delete outHeaders['cross-origin-opener-policy'];
+    delete outHeaders['cross-origin-embedder-policy'];
+    delete outHeaders['cross-origin-resource-policy'];
+    delete outHeaders['origin-agent-cluster'];
+    delete outHeaders['permissions-policy'];
+    
+    // Add CORS headers to ALL responses (images, fonts, stylesheets need this)
+    outHeaders['access-control-allow-origin'] = '*';
+    outHeaders['access-control-allow-credentials'] = 'true';
+    outHeaders['access-control-allow-methods'] = 'GET, HEAD, OPTIONS';
+    outHeaders['access-control-allow-headers'] = '*';
+    outHeaders['access-control-expose-headers'] = '*';
+    
+    // Keep content-length for streaming responses
+    // Only delete if we're going to modify content
+    if (isHtml || isCss || isJs || isJson || isXml) {
+      delete outHeaders['content-length'];
+      delete outHeaders['content-encoding'];
+      delete outHeaders['transfer-encoding'];
+      outHeaders['cache-control'] = 'no-store';
+    }
+    delete outHeaders['alt-svc'];
 
     // Sniff content type from URL extension when server sends generic types
     const urlExt = (url.pathname.match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase();
@@ -826,21 +841,90 @@ function browseHandler(req, res, targetUrl, depth = 0) {
       return;
     }
 
-    // Add CORS headers so rewritten content can be fetched cross-origin
-    outHeaders['access-control-allow-origin'] = '*';
-    outHeaders['access-control-allow-credentials'] = 'true';
-
+    // Only buffer content that needs rewriting (HTML, CSS, JS, JSON, XML)
+    // Don't buffer based on status code alone - this breaks large file transfers
+    const MAX_BUFFER_SIZE = 10 * 1024 * 1024; // 10MB limit
     if (shouldRewriteHtml || shouldRewriteCss || shouldRewriteJs || isJson || isXml) {
       const chunks = [];
-      stream.on('data', c => chunks.push(c));
+      let bufferSize = 0;
+      let tooLarge = false;
+      
+      stream.on('data', c => {
+        bufferSize += c.length;
+        if (bufferSize > MAX_BUFFER_SIZE) {
+          tooLarge = true;
+          stream.pause();
+        } else {
+          chunks.push(c);
+        }
+      });
+      
       stream.on('error', () => { if (!res.headersSent) { res.writeHead(502); res.end('decode error'); } });
+      
       stream.on('end', () => {
+        if (tooLarge) {
+          // File too large to rewrite, stream as-is
+          res.writeHead(proxyRes.statusCode, outHeaders);
+          stream.pipe(res);
+          return;
+        }
+        
         const buf = Buffer.concat(chunks);
         const text = decodeBody(buf, charset);
         const baseProxyUrl = '/_midas/' + currentPaths.browse;
         let out = text;
 
-        if (shouldRewriteHtml) {
+        // Sniff HTML content by looking at first non-whitespace chars
+        let actuallyHtml = shouldRewriteHtml;
+        if (!actuallyHtml && proxyRes.statusCode === 200 && buf.length > 0) {
+          const sniff = text.trim().substring(0, 20).toLowerCase();
+          actuallyHtml = sniff.startsWith('<!doctype') || sniff.startsWith('<html') || sniff.startsWith('<head') || sniff.startsWith('<body') || sniff.startsWith('<?xml');
+        }
+
+        // Check if this is a CAPTCHA challenge page - if so, show manual CAPTCHA prompt
+        if (actuallyHtml && isCaptchaHtml(text)) {
+          outHeaders['content-type'] = 'text/html; charset=utf-8';
+          out = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CAPTCHA Challenge</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
+    .captcha-box { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 500px; text-align: center; }
+    h1 { color: #d32f2f; margin-top: 0; font-size: 28px; }
+    p { color: #666; line-height: 1.6; margin: 15px 0; }
+    .warning { background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; text-align: left; border-radius: 4px; font-size: 14px; }
+    .warning strong { display: block; margin-bottom: 5px; color: #856404; }
+    .warning p { margin: 5px 0; }
+    a { color: #1976d2; text-decoration: none; font-weight: 500; }
+    a:hover { text-decoration: underline; }
+    .button { display: inline-block; background: #1976d2; color: white; padding: 12px 24px; border-radius: 4px; margin-top: 20px; text-decoration: none; cursor: pointer; }
+    .button:hover { background: #1565c0; }
+    .footer { font-size: 12px; color: #999; margin-top: 30px; }
+  </style>
+</head>
+<body>
+  <div class="captcha-box">
+    <h1>⚠️ CAPTCHA Challenge</h1>
+    <p>The website requires human verification through a CAPTCHA.</p>
+    <div class="warning">
+      <strong>What this means:</strong>
+      <p>You need to visit the website directly to complete the CAPTCHA challenge. Once completed, your session will be verified.</p>
+    </div>
+    <p><strong>Site:</strong> <a href="${targetUrl}" target="_blank">${new URL(targetUrl).hostname}</a></p>
+    <a href="${targetUrl}" class="button" target="_blank">Verify on Site</a>
+    <div class="footer">Midas Proxy • Manual CAPTCHA Mode</div>
+  </div>
+</body>
+</html>`;
+          res.writeHead(429, outHeaders);
+          res.end(out);
+          return;
+        }
+
+        if (actuallyHtml) {
           out = rewriteHtml(text, url.toString(), baseProxyUrl);
           outHeaders['content-type'] = 'text/html; charset=utf-8';
         } else if (shouldRewriteCss) {

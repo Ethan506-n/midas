@@ -7,6 +7,16 @@
   if (window.__midas_hook) return;
   window.__midas_hook = true;
 
+  // Global error handler for SPA issues
+  var errorCount = 0;
+  var origError = console.error;
+  console.error = function() {
+    errorCount++;
+    return origError.apply(console, arguments);
+  };
+  window.addEventListener('error', function() { errorCount++; });
+  window.addEventListener('unhandledrejection', function() { errorCount++; });
+
   // Detect proxy base from current URL path
   var m = location.pathname.match(/^(\/_midas\/[^\/]+)/);
   var PROXY_BASE = m ? m[1] : '';

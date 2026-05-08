@@ -9,18 +9,43 @@ const CAPTCHA_PATTERNS = [
   { domain: 'www.google.com', paths: ['/recaptcha/', '/recaptcha/api.js', '/recaptcha/enterprise.js'] },
   { domain: 'www.recaptcha.net', paths: ['/recaptcha/'] },
   { domain: 'www.gstatic.com', paths: ['/recaptcha/'] },
+  { domain: 'google.com', paths: ['/recaptcha/'] },
+  
   // hCaptcha
   { domain: 'js.hcaptcha.com', paths: ['/1/', '/hcaptcha.js'] },
   { domain: 'api.hcaptcha.com', paths: ['/checkcaptcha/', '/getcaptcha/'] },
   { domain: 'newassets.hcaptcha.com', paths: ['/captcha/'] },
+  { domain: 'hcaptcha.com', paths: [] },
+  
   // Cloudflare Turnstile & IUAM
   { domain: 'challenges.cloudflare.com', paths: ['/turnstile/', '/cdn-cgi/challenge-platform/'] },
   { domain: 'cdnjs.cloudflare.com', paths: ['/ajax/libs/turnstile/'] },
+  { domain: 'cloudflare.com', paths: ['/cdn-cgi/', '/challenge-platform/'] },
+  
+  // AWS WAF
+  { domain: 'waf.amazonaws.com', paths: [] },
+  { domain: 'wafv2.amazonaws.com', paths: [] },
+  
+  // Imperva/Incapsula
+  { domain: 'cdn.incapsula.com', paths: ['/'] },
+  { domain: 'imperva.com', paths: ['/'] },
+  
+  // Others
+  { domain: 'arkose.com', paths: ['/v2/', '/api/'] },
+  { domain: 'arkoselabs.com', paths: ['/'] },
+  { domain: 'friendly-captcha.com', paths: ['/'] },
+  { domain: 'altcaptcha.com', paths: ['/'] },
+  
   // Cloudflare challenge assets
   { domain: null, paths: [], patterns: [
     /\/cdn-cgi\/challenge-platform/i,
     /\/turnstile\//i,
+    /waf\.amazonaws\.com/i,
+    /imperva\.com/i,
+    /arcose|arkose/i,
+    /friendly-captcha/i,
   ]},
+  
   // Generic challenge patterns
   { domain: null, paths: [], patterns: [
     /recaptcha/i,
@@ -29,6 +54,9 @@ const CAPTCHA_PATTERNS = [
     /grecaptcha/i,
     /cf-challenge/i,
     /challenge-platform/i,
+    /captcha/i,
+    /challenge/i,
+    /verify/i,
   ]},
 ];
 
@@ -60,18 +88,51 @@ export function isCaptchaUrl(url) {
 }
 
 export function isCaptchaHtml(html) {
-  const indicators = [
-    'g-recaptcha',
-    'data-sitekey',
-    'h-captcha',
-    'cf-turnstile',
-    'challenge-platform',
-    'recaptcha/api.js',
-    'hcaptcha.com',
-    'turnstile.js',
-  ];
   const lower = html.toLowerCase();
-  return indicators.some(i => lower.includes(i));
+  
+  // Check for explicit CAPTCHA indicators (high confidence)
+  const captchaPatterns = [
+    // Google reCAPTCHA
+    /g-recaptcha[>\s]/i,
+    /data-sitekey[=\s]/i,
+    /recaptcha\/api\.js/i,
+    /grecaptcha\s*\./i,
+    
+    // hCaptcha
+    /h-captcha[>\s]/i,
+    /hcaptcha\.com/i,
+    
+    // Cloudflare Turnstile (specifically the challenge UI, not cdn-cgi scripts)
+    /cf-turnstile[>\s]/i,
+    /window\.turnstile/i,
+    /turnstile\.render/i,
+    
+    // AWS WAF
+    /aws-waf-/i,
+    /waf\.amazonaws\.com/i,
+    
+    // Imperva
+    /imperva/i,
+    /incapsula\.com/i,
+    
+    // Arkose
+    /arkose\.com/i,
+    /getArkose/i,
+    
+    // Friendly Captcha
+    /friendly-captcha/i,
+    /friendlycaptcha\.com/i,
+    
+    // AltCaptcha
+    /altcaptcha/i,
+    
+    // Generic CAPTCHA patterns (more specific than before)
+    /class\s*=\s*["'].*captcha[^"']*["']/i,
+    /id\s*=\s*["'].*captcha[^"']*["']/i,
+    /<div\s+[^>]*data-captcha/i,
+  ];
+  
+  return captchaPatterns.some(pattern => pattern.test(html));
 }
 
 export function buildPassthroughHeaders(reqHeaders, targetUrl) {

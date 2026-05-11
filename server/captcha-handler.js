@@ -135,6 +135,13 @@ export function isCaptchaHtml(html) {
   return captchaPatterns.some(pattern => pattern.test(html));
 }
 
+// New function: Allow CAPTCHAs to render inline in the proxy
+export function shouldAllowInlineCaptcha(html) {
+  // Return true to allow CAPTCHA pages to render inline
+  // This allows users to solve CAPTCHAs without leaving the proxy
+  return isCaptchaHtml(html);
+}
+
 export function buildPassthroughHeaders(reqHeaders, targetUrl) {
   const headers = {};
   const keep = [

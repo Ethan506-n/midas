@@ -4,10 +4,14 @@ import zlib from 'zlib';
 import { URL } from 'url';
 import { getEndpointPaths, matchPolymorphicPath } from './polymorph-router.js';
 import { wsBridgeHandler } from './ws-bridge.js';
-import { isCaptchaUrl, isCaptchaHtml, buildPassthroughHeaders } from './captcha-handler.js';
+import { isCaptchaUrl, isCaptchaHtml, buildPassthroughHeaders, shouldAllowInlineCaptcha } from './captcha-handler.js';
+import { checkRateLimit, getAgent } from './rate-limiter.js';
+import { generateRandomHeaders, injectAntiDetectionScript, cleanResponseHeaders } from './anti-detection.js';
+import { shouldCache, getCacheTTL, getCached, setCached, getCacheStats } from './response-cache.js';
 
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50, maxFreeSockets: 10, timeout: 30000, freeSocketTimeout: 30000 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50, maxFreeSockets: 10, timeout: 30000, freeSocketTimeout: 30000 });
+// Default agents (fallback)
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50, maxFreeSockets: 10, timeout: 60000, freeSocketTimeout: 60000 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50, maxFreeSockets: 10, timeout: 60000, freeSocketTimeout: 60000 });
 const ACTIVE_TRANSPORTS = new Map();
 const COOKIE_JAR = new Map();
 
@@ -673,6 +677,34 @@ function browseHandler(req, res, targetUrl, depth = 0) {
     res.writeHead(400, { 'content-type': 'text/plain' }); res.end('unsupported protocol'); return;
   }
 
+  // Apply rate limiting per domain
+  (async () => {
+    try {
+      await checkRateLimit(url.hostname);
+    } catch (e) {
+      console.error('Rate limit error:', e.message);
+    }
+    
+    // Check cache for GET requests
+    if (req.method === 'GET') {
+      const cached = getCached('GET', targetUrl);
+      if (cached) {
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'x-cache': 'HIT',
+          'cache-control': 'max-age=300',
+        });
+        res.end(cached);
+        return;
+      }
+    }
+
+    browseHandlerImpl(req, res, url, jar, targetUrl, depth);
+  })();
+}
+
+function browseHandlerImpl(req, res, url, jar, targetUrl, depth = 0) {
+
   const reqUrl = new URL(req.url, 'http://x');
   for (const [k, v] of reqUrl.searchParams) {
     if (k === 'url') continue;
@@ -682,28 +714,28 @@ function browseHandler(req, res, targetUrl, depth = 0) {
   const isHttps = url.protocol === 'https:';
   const lib = isHttps ? https : http;
 
-  const UA = req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
-
-  const headers = {};
+  // Use randomized anti-detection headers
+  const detectionHeaders = generateRandomHeaders();
+  const headers = detectionHeaders;
+  
+  // Override with host (required)
   headers['host'] = url.host;
-  headers['user-agent'] = UA;
-  headers['accept'] = req.headers['accept'] || 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7';
-  headers['accept-language'] = req.headers['accept-language'] || 'en-US,en;q=0.9';
-  headers['accept-encoding'] = 'gzip, deflate, br';
-  headers['sec-ch-ua'] = req.headers['sec-ch-ua'] || '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"';
-  headers['sec-ch-ua-mobile'] = req.headers['sec-ch-ua-mobile'] || '?0';
-  headers['sec-ch-ua-platform'] = req.headers['sec-ch-ua-platform'] || '"Windows"';
 
   // Determine sec-fetch-* based on accept header (heuristic)
   const isDocumentReq = (req.headers['accept'] || '').includes('text/html') || (req.headers['sec-fetch-dest'] === 'document');
   const isXhrOrFetch = req.headers['x-requested-with'] === 'XMLHttpRequest' || req.headers['sec-fetch-mode'] === 'cors' || req.headers['sec-fetch-mode'] === 'same-origin';
-  headers['sec-fetch-dest'] = req.headers['sec-fetch-dest'] || (isDocumentReq ? 'document' : (isXhrOrFetch ? 'empty' : 'empty'));
-  headers['sec-fetch-mode'] = req.headers['sec-fetch-mode'] || (isDocumentReq ? 'navigate' : 'cors');
-  headers['sec-fetch-site'] = req.headers['sec-fetch-site'] || 'none';
-  if (isDocumentReq) headers['sec-fetch-user'] = '?1';
-  if (isDocumentReq) headers['upgrade-insecure-requests'] = '1';
+  
+  // Update sec-fetch headers based on request type
+  if (isDocumentReq) {
+    headers['sec-fetch-dest'] = 'document';
+    headers['sec-fetch-mode'] = 'navigate';
+    headers['sec-fetch-user'] = '?1';
+  } else if (isXhrOrFetch) {
+    headers['sec-fetch-dest'] = 'empty';
+    headers['sec-fetch-mode'] = 'cors';
+  }
 
-  headers['cache-control'] = req.headers['cache-control'] || (isDocumentReq ? 'max-age=0' : 'no-cache');
+  headers['cache-control'] = isDocumentReq ? 'max-age=0' : 'no-cache';
   if (req.headers['pragma']) headers['pragma'] = req.headers['pragma'];
 
   // Forward content-type for POST/PUT/PATCH
@@ -750,6 +782,9 @@ function browseHandler(req, res, targetUrl, depth = 0) {
     Object.assign(headers, buildPassthroughHeaders(req.headers, targetUrl));
   }
 
+  // Use pooled agent for connection reuse and rate limiting
+  const pooledAgent = getAgent(url.hostname, isHttps);
+  
   const options = {
     hostname: url.hostname,
     port: url.port || (isHttps ? 443 : 80),
@@ -757,6 +792,7 @@ function browseHandler(req, res, targetUrl, depth = 0) {
     method: req.method,
     headers,
     rejectUnauthorized: false,
+    agent: pooledAgent,
   };
 
   const proxyReq = lib.request(options, (proxyRes) => {
@@ -782,6 +818,7 @@ function browseHandler(req, res, targetUrl, depth = 0) {
 
     const enc = (proxyRes.headers['content-encoding'] || '').toLowerCase();
     let stream = proxyRes;
+    const wasCompressed = !!enc;
     if (enc === 'gzip') stream = proxyRes.pipe(zlib.createGunzip());
     else if (enc === 'deflate') stream = proxyRes.pipe(zlib.createInflate());
     else if (enc === 'br') stream = proxyRes.pipe(zlib.createBrotliDecompress());
@@ -823,6 +860,13 @@ function browseHandler(req, res, targetUrl, depth = 0) {
       delete outHeaders['transfer-encoding'];
       outHeaders['cache-control'] = 'no-store';
     }
+    
+    // If we decompressed the stream, always remove content-encoding
+    // because the client will receive uncompressed data
+    if (wasCompressed && enc) {
+      delete outHeaders['content-encoding'];
+      delete outHeaders['content-length'];
+    }
     delete outHeaders['alt-svc'];
 
     // Sniff content type from URL extension when server sends generic types
@@ -835,6 +879,8 @@ function browseHandler(req, res, targetUrl, depth = 0) {
     const shouldRewriteCss = isCss || sniffedCss;
     const shouldRewriteHtml = isHtml || sniffedHtml;
 
+    // Allow CAPTCHA pages to be rewritten and rendered inline (not passthrough)
+    // This enables users to solve CAPTCHAs without leaving the proxy
     if (isCaptchaRequest && !shouldRewriteHtml) {
       res.writeHead(proxyRes.statusCode, outHeaders);
       stream.pipe(res);
@@ -881,49 +927,6 @@ function browseHandler(req, res, targetUrl, depth = 0) {
           actuallyHtml = sniff.startsWith('<!doctype') || sniff.startsWith('<html') || sniff.startsWith('<head') || sniff.startsWith('<body') || sniff.startsWith('<?xml');
         }
 
-        // Check if this is a CAPTCHA challenge page - if so, show manual CAPTCHA prompt
-        if (actuallyHtml && isCaptchaHtml(text)) {
-          outHeaders['content-type'] = 'text/html; charset=utf-8';
-          out = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CAPTCHA Challenge</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
-    .captcha-box { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 500px; text-align: center; }
-    h1 { color: #d32f2f; margin-top: 0; font-size: 28px; }
-    p { color: #666; line-height: 1.6; margin: 15px 0; }
-    .warning { background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; text-align: left; border-radius: 4px; font-size: 14px; }
-    .warning strong { display: block; margin-bottom: 5px; color: #856404; }
-    .warning p { margin: 5px 0; }
-    a { color: #1976d2; text-decoration: none; font-weight: 500; }
-    a:hover { text-decoration: underline; }
-    .button { display: inline-block; background: #1976d2; color: white; padding: 12px 24px; border-radius: 4px; margin-top: 20px; text-decoration: none; cursor: pointer; }
-    .button:hover { background: #1565c0; }
-    .footer { font-size: 12px; color: #999; margin-top: 30px; }
-  </style>
-</head>
-<body>
-  <div class="captcha-box">
-    <h1>⚠️ CAPTCHA Challenge</h1>
-    <p>The website requires human verification through a CAPTCHA.</p>
-    <div class="warning">
-      <strong>What this means:</strong>
-      <p>You need to visit the website directly to complete the CAPTCHA challenge. Once completed, your session will be verified.</p>
-    </div>
-    <p><strong>Site:</strong> <a href="${targetUrl}" target="_blank">${new URL(targetUrl).hostname}</a></p>
-    <a href="${targetUrl}" class="button" target="_blank">Verify on Site</a>
-    <div class="footer">Midas Proxy • Manual CAPTCHA Mode</div>
-  </div>
-</body>
-</html>`;
-          res.writeHead(429, outHeaders);
-          res.end(out);
-          return;
-        }
-
         if (actuallyHtml) {
           out = rewriteHtml(text, url.toString(), baseProxyUrl);
           outHeaders['content-type'] = 'text/html; charset=utf-8';
@@ -945,6 +948,14 @@ function browseHandler(req, res, targetUrl, depth = 0) {
             if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
             return toProxyUrl(u);
           });
+        }
+
+        // Cache HTML responses
+        if (actuallyHtml && req.method === 'GET' && proxyRes.statusCode === 200) {
+          const ttl = getCacheTTL(proxyRes.headers['cache-control'], 'text/html');
+          if (ttl > 0) {
+            setCached('GET', targetUrl, out, ttl);
+          }
         }
 
         res.writeHead(proxyRes.statusCode, outHeaders);

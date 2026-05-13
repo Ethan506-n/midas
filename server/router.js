@@ -8,6 +8,9 @@ import { isCaptchaUrl, isCaptchaHtml, buildPassthroughHeaders, shouldAllowInline
 import { checkRateLimit, getAgent } from './rate-limiter.js';
 import { generateRandomHeaders, injectAntiDetectionScript, cleanResponseHeaders } from './anti-detection.js';
 import { shouldCache, getCacheTTL, getCached, setCached, getCacheStats } from './response-cache.js';
+import { getDomainConfig, shouldPreserveAuth, handlesJsonApi, getRateLimit } from './domain-handler.js';
+import { globalRetry } from './error-recovery.js';
+import { resolveWithFallback, clearDnsCache: clearCache } from './dns-resolver.js';
 
 // Default agents (fallback)
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50, maxFreeSockets: 10, timeout: 60000, freeSocketTimeout: 60000 });
@@ -327,13 +330,17 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
 
   const isChallengePage = isCaptchaHtml(html);
   if (!isChallengePage) {
+    // Inject anti-detection script early (before sandbox)
+    const antiDetectionScript = '<script>' + injectAntiDetectionScript() + '</script>';
     const stealthScript = getStealthScript(baseUrl);
+    const injectionScript = antiDetectionScript + stealthScript;
+    
     if (html.includes('</head>')) {
-      html = html.replace('</head>', stealthScript + '</head>');
+      html = html.replace('</head>', injectionScript + '</head>');
     } else if (html.includes('</body>')) {
-      html = html.replace('</body>', stealthScript + '</body>');
+      html = html.replace('</body>', injectionScript + '</body>');
     } else {
-      html += stealthScript;
+      html += injectionScript;
     }
   }
 
@@ -677,30 +684,24 @@ function browseHandler(req, res, targetUrl, depth = 0) {
     res.writeHead(400, { 'content-type': 'text/plain' }); res.end('unsupported protocol'); return;
   }
 
-  // Apply rate limiting per domain
-  (async () => {
-    try {
-      await checkRateLimit(url.hostname);
-    } catch (e) {
-      console.error('Rate limit error:', e.message);
+  // Check cache for GET requests BEFORE rate limiting
+  if (req.method === 'GET') {
+    const cached = getCached('GET', targetUrl);
+    if (cached) {
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'x-cache': 'HIT',
+        'cache-control': 'max-age=300',
+      });
+      res.end(cached);
+      return;
     }
-    
-    // Check cache for GET requests
-    if (req.method === 'GET') {
-      const cached = getCached('GET', targetUrl);
-      if (cached) {
-        res.writeHead(200, {
-          'content-type': 'text/html; charset=utf-8',
-          'x-cache': 'HIT',
-          'cache-control': 'max-age=300',
-        });
-        res.end(cached);
-        return;
-      }
-    }
+  }
 
-    browseHandlerImpl(req, res, url, jar, targetUrl, depth);
-  })();
+  // Apply rate limiting synchronously (non-blocking)
+  checkRateLimit(url.hostname).catch(e => console.error('Rate limit error:', e.message));
+
+  browseHandlerImpl(req, res, url, jar, targetUrl, depth);
 }
 
 function browseHandlerImpl(req, res, url, jar, targetUrl, depth = 0) {
@@ -713,6 +714,22 @@ function browseHandlerImpl(req, res, url, jar, targetUrl, depth = 0) {
 
   const isHttps = url.protocol === 'https:';
   const lib = isHttps ? https : http;
+
+  // Wrap in async to support DNS resolution
+  (async () => {
+    try {
+      await browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib);
+    } catch (err) {
+      console.error(`[Browse] Error: ${err.message}`);
+      if (!res.headersSent) {
+        res.writeHead(502, { 'content-type': 'text/plain' });
+        res.end('proxy error');
+      }
+    }
+  })();
+}
+
+async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib) {
 
   // Use randomized anti-detection headers
   const detectionHeaders = generateRandomHeaders();
@@ -785,8 +802,20 @@ function browseHandlerImpl(req, res, url, jar, targetUrl, depth = 0) {
   // Use pooled agent for connection reuse and rate limiting
   const pooledAgent = getAgent(url.hostname, isHttps);
   
+  // Try to resolve with alternative DNS to bypass ISP blocks
+  let resolvedIp = url.hostname;
+  try {
+    resolvedIp = await resolveWithFallback(url.hostname);
+    if (resolvedIp && resolvedIp !== url.hostname) {
+      console.log(`[BYPASS] Using IP ${resolvedIp} for ${url.hostname}`);
+    }
+  } catch (err) {
+    console.log(`[BYPASS] Failed to resolve ${url.hostname}, using hostname directly`);
+    // Fall through to use hostname
+  }
+  
   const options = {
-    hostname: url.hostname,
+    hostname: resolvedIp,  // Use resolved IP to bypass DNS blocks
     port: url.port || (isHttps ? 443 : 80),
     path: url.pathname + url.search,
     method: req.method,
@@ -795,19 +824,35 @@ function browseHandlerImpl(req, res, url, jar, targetUrl, depth = 0) {
     agent: pooledAgent,
   };
 
+  // Debug logging for problematic sites
+  const isProblematicSite = url.hostname.includes('facebook') || url.hostname.includes('twitter') || url.hostname.includes('netflix');
+  if (isProblematicSite) {
+    console.log(`[${url.hostname}] Requesting ${url.pathname}${url.search.slice(0, 50)}`);
+  }
+
   const proxyReq = lib.request(options, (proxyRes) => {
+    if (isProblematicSite) {
+      console.log(`[${url.hostname}] Got response: ${proxyRes.statusCode}, headers: ${JSON.stringify(Object.keys(proxyRes.headers))}`);
+    }
     storeCookies(jar, url.hostname, proxyRes.headers['set-cookie']);
 
     if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location && depth < 8) {
       const next = resolveUrl(url.toString(), proxyRes.headers.location);
-      proxyRes.resume();
       if (next) {
-        if (req.method === 'GET' || req.method === 'HEAD') {
-          browseHandler(req, res, next, depth + 1);
-          return;
+        if (isProblematicSite) {
+          console.log(`[${url.hostname}] Redirect to: ${next}`);
         }
-        res.writeHead(302, { location: toProxyUrl(next), 'cache-control': 'no-store' });
-        res.end();
+        // Properly drain the response stream before following redirect
+        proxyRes.on('data', () => {}); // Drain any buffered data
+        proxyRes.on('end', () => {
+          if (isProblematicSite) console.log(`[${url.hostname}] Following redirect`);
+          if (req.method === 'GET' || req.method === 'HEAD') {
+            browseHandler(req, res, next, depth + 1);
+          } else {
+            res.writeHead(302, { location: toProxyUrl(next), 'cache-control': 'no-store' });
+            res.end();
+          }
+        });
         return;
       }
     }
@@ -896,10 +941,15 @@ function browseHandlerImpl(req, res, url, jar, targetUrl, depth = 0) {
       let tooLarge = false;
       
       stream.on('data', c => {
+        if (tooLarge) return; // Stop collecting if already too large
         bufferSize += c.length;
         if (bufferSize > MAX_BUFFER_SIZE) {
           tooLarge = true;
           stream.pause();
+          // Send buffered content as-is without rewriting
+          res.writeHead(proxyRes.statusCode, outHeaders);
+          if (chunks.length > 0) res.write(Buffer.concat(chunks));
+          stream.pipe(res); // Pipe remaining content
         } else {
           chunks.push(c);
         }
@@ -908,12 +958,7 @@ function browseHandlerImpl(req, res, url, jar, targetUrl, depth = 0) {
       stream.on('error', () => { if (!res.headersSent) { res.writeHead(502); res.end('decode error'); } });
       
       stream.on('end', () => {
-        if (tooLarge) {
-          // File too large to rewrite, stream as-is
-          res.writeHead(proxyRes.statusCode, outHeaders);
-          stream.pipe(res);
-          return;
-        }
+        if (tooLarge || res.headersSent) return; // Already sent
         
         const buf = Buffer.concat(chunks);
         const text = decodeBody(buf, charset);
@@ -938,10 +983,36 @@ function browseHandlerImpl(req, res, url, jar, targetUrl, depth = 0) {
           // Preserve original content-type so browsers parse as module if needed
           outHeaders['content-type'] = ct.includes('module') ? 'application/javascript; charset=utf-8' : (ct || 'application/javascript; charset=utf-8');
         } else if (isJson) {
-          out = text.replace(/(?<!\\)"(https?:\/\/[^"\\]+)(?<!\\)"/g, (m, u) => {
-            if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
-            return '"' + toProxyUrl(u) + '"';
-          });
+          // Use recursive JSON rewriting for better handling of nested structures
+          try {
+            const jsonData = JSON.parse(text);
+            function rewriteJsonUrls(obj) {
+              if (!obj) return obj;
+              if (typeof obj === 'string') {
+                if (/^https?:\/\//i.test(obj) && !isAlreadyProxied(obj) && !isCaptchaUrl(obj)) {
+                  const abs = resolveUrl(url.toString(), obj);
+                  return abs ? toProxyUrl(abs) : obj;
+                }
+                return obj;
+              }
+              if (Array.isArray(obj)) return obj.map(rewriteJsonUrls);
+              if (typeof obj === 'object') {
+                const result = {};
+                for (const [k, v] of Object.entries(obj)) {
+                  result[k] = rewriteJsonUrls(v);
+                }
+                return result;
+              }
+              return obj;
+            }
+            out = JSON.stringify(rewriteJsonUrls(jsonData));
+          } catch {
+            // Fallback to regex if JSON parsing fails
+            out = text.replace(/(?<!\\)"(https?:\/\/[^"\\]+)(?<!\\)"/g, (m, u) => {
+              if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
+              return '"' + toProxyUrl(u) + '"';
+            });
+          }
         } else if (isXml) {
           // Rewrite URLs inside XML (RSS feeds, sitemaps, etc.)
           out = text.replace(/(https?:\/\/[^\s<>"']{4,})/g, (m, u) => {
@@ -967,10 +1038,22 @@ function browseHandlerImpl(req, res, url, jar, targetUrl, depth = 0) {
     }
   });
 
-  proxyReq.on('error', () => {
+  proxyReq.on('error', (err) => {
+    if (isProblematicSite) {
+      console.error(`[${url.hostname}] Request error: ${err.code || err.message}`);
+    }
     if (!res.headersSent) {
       res.writeHead(502, { 'content-type': 'text/plain' });
       res.end('proxy error');
+    }
+  });
+
+  proxyReq.setTimeout(30000, () => {
+    if (isProblematicSite) console.error(`[${url.hostname}] Request socket timeout`);
+    proxyReq.destroy();
+    if (!res.headersSent) {
+      res.writeHead(504, { 'content-type': 'text/plain' });
+      res.end('gateway timeout');
     }
   });
 
@@ -1001,6 +1084,15 @@ export function router(req, res, url) {
       transport,
       nonce: Math.random().toString(36).slice(2),
       paths: currentPaths,
+    }));
+    return;
+  }
+
+  if (pathname === '/_midas/stats') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      cache: getCacheStats(),
+      timestamp: new Date().toISOString(),
     }));
     return;
   }

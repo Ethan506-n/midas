@@ -10,7 +10,9 @@ import { generateRandomHeaders, injectAntiDetectionScript, cleanResponseHeaders 
 import { shouldCache, getCacheTTL, getCached, setCached, getCacheStats } from './response-cache.js';
 import { getDomainConfig, shouldPreserveAuth, handlesJsonApi, getRateLimit } from './domain-handler.js';
 import { globalRetry } from './error-recovery.js';
-import { resolveWithFallback, clearDnsCache: clearCache } from './dns-resolver.js';
+import { resolveWithFallback } from './dns-resolver.js';
+import { isFilterDomain, getBypassHeaders, isFilterBlockPage } from './filter-bypass.js';
+import { getEnhancedAntiDetectionHeaders, isCloudflareChallenge, getCloudflareBypassHeaders, addBrowserDelay } from './advanced-evasion.js';
 
 // Default agents (fallback)
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50, maxFreeSockets: 10, timeout: 60000, freeSocketTimeout: 60000 });
@@ -718,7 +720,7 @@ function browseHandlerImpl(req, res, url, jar, targetUrl, depth = 0) {
   // Wrap in async to support DNS resolution
   (async () => {
     try {
-      await browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib);
+      await browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib, isHttps);
     } catch (err) {
       console.error(`[Browse] Error: ${err.message}`);
       if (!res.headersSent) {
@@ -729,10 +731,21 @@ function browseHandlerImpl(req, res, url, jar, targetUrl, depth = 0) {
   })();
 }
 
-async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib) {
+async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib, isHttps) {
 
-  // Use randomized anti-detection headers
-  const detectionHeaders = generateRandomHeaders();
+  // Add realistic browser delay for human-like behavior
+  if (depth > 0) {
+    await addBrowserDelay();
+  }
+
+  // Use enhanced anti-detection headers with IP scrambling and proxy headers
+  let detectionHeaders = getEnhancedAntiDetectionHeaders(depth);
+  
+  // Apply bypass headers if we're retrying due to filter
+  if (depth > 0) {
+    detectionHeaders = { ...detectionHeaders, ...getBypassHeaders() };
+    console.log(`[BYPASS] Attempt ${depth} with enhanced evasion headers`);
+  }
   const headers = detectionHeaders;
   
   // Override with host (required)
@@ -839,10 +852,37 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib)
     if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location && depth < 8) {
       const next = resolveUrl(url.toString(), proxyRes.headers.location);
       if (next) {
+        const nextUrl = new URL(next);
+        
+        // Check if this is a filter domain blocking our request
+        if (isFilterDomain(nextUrl.hostname)) {
+          if (isProblematicSite) {
+            console.log(`[FILTER] Detected filter redirect: ${nextUrl.hostname}`);
+            console.log(`[FILTER] Retrying original URL with bypass headers...`);
+          }
+          
+          // Don't follow the filter redirect
+          proxyRes.on('data', () => {}); // Drain response
+          proxyRes.on('end', () => {
+            // Retry the original request with bypass headers
+            const bypassReqUrl = new URL(req.url, 'http://x');
+            const retryUrl = bypassReqUrl.searchParams.get('url');
+            if (retryUrl && depth < 3) {
+              // Recursively call with increased depth to use different bypass technique
+              browseHandler(req, res, retryUrl, depth + 1);
+            } else {
+              // Give up, return error
+              res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(`<h1>Content Blocked</h1><p>This site is blocked by your network filter.</p><p>Filter: ${nextUrl.hostname}</p>`);
+            }
+          });
+          return;
+        }
+        
+        // Normal redirect handling
         if (isProblematicSite) {
           console.log(`[${url.hostname}] Redirect to: ${next}`);
         }
-        // Properly drain the response stream before following redirect
         proxyRes.on('data', () => {}); // Drain any buffered data
         proxyRes.on('end', () => {
           if (isProblematicSite) console.log(`[${url.hostname}] Following redirect`);
@@ -964,6 +1004,16 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib)
         const text = decodeBody(buf, charset);
         const baseProxyUrl = '/_midas/' + currentPaths.browse;
         let out = text;
+
+        // Check for Cloudflare challenges
+        if (isHtml && isCloudflareChallenge(text) && depth < 3) {
+          if (isProblematicSite) {
+            console.log(`[CF] Detected Cloudflare challenge, retrying with bypass headers...`);
+          }
+          // Retry with Cloudflare bypass headers
+          browseHandler(req, res, targetUrl, depth + 1);
+          return;
+        }
 
         // Sniff HTML content by looking at first non-whitespace chars
         let actuallyHtml = shouldRewriteHtml;

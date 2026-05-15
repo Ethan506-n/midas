@@ -1,18 +1,15 @@
 import dns from 'dns';
+import https from 'https';
 import { promisify } from 'util';
 
 // Alternative DNS servers to bypass ISP-level DNS blocking
 const ALTERNATIVE_DNS = [
-  // Cloudflare (Fast, privacy-focused)
-  { servers: ['1.1.1.1', '1.0.0.1'], name: 'Cloudflare' },
+  // Cloudflare (Fast, privacy-focused) - Use DoH for DNS-over-HTTPS
+  { servers: ['1.1.1.1', '1.0.0.1'], name: 'Cloudflare', doh: 'https://1.1.1.1/dns-query' },
   // Google Public DNS
-  { servers: ['8.8.8.8', '8.8.4.4'], name: 'Google' },
+  { servers: ['8.8.8.8', '8.8.4.4'], name: 'Google', doh: 'https://8.8.8.8/dns-query' },
   // Quad9 (Security-focused)
-  { servers: ['9.9.9.9', '149.112.112.112'], name: 'Quad9' },
-  // OpenDNS
-  { servers: ['208.67.222.222', '208.67.220.220'], name: 'OpenDNS' },
-  // Verisign
-  { servers: ['64.6.64.6', '64.6.65.6'], name: 'Verisign' },
+  { servers: ['9.9.9.9', '149.112.112.112'], name: 'Quad9', doh: 'https://9.9.9.9/dns-query' },
 ];
 
 const dnsLookup = promisify(dns.lookup);
@@ -20,6 +17,42 @@ const dnsLookup = promisify(dns.lookup);
 // Cache resolved IPs to avoid repeated lookups
 const IP_CACHE = new Map();
 const CACHE_TTL = 3600000; // 1 hour
+
+/**
+ * Resolve using DNS-over-HTTPS to bypass ISP DNS filtering
+ */
+function resolveViaDOH(hostname, dohUrl) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(dohUrl);
+    const query = `?name=${encodeURIComponent(hostname)}&type=A`;
+    
+    https.get(`${dohUrl}${query}`, {
+      headers: {
+        'accept': 'application/dns-json',
+      },
+      timeout: 5000,
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const result = JSON.parse(data);
+          if (result.Answer && result.Answer.length > 0) {
+            // Find A record
+            const aRecord = result.Answer.find(r => r.type === 1);
+            if (aRecord) {
+              resolve(aRecord.data);
+              return;
+            }
+          }
+          reject(new Error('No A records in DoH response'));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }).on('error', reject);
+  });
+}
 
 /**
  * Resolve domain using system DNS first, fallback to alternative DNS
@@ -35,18 +68,39 @@ export async function resolveWithFallback(hostname) {
   try {
     const address = await dnsLookup(hostname);
     const ip = address.address;
-    IP_CACHE.set(hostname, { ip, expires: Date.now() + CACHE_TTL });
-    console.log(`[DNS] System resolver: ${hostname} -> ${ip}`);
-    return ip;
+    
+    // Check if this looks like a filter redirect (private IP range)
+    if (!isPrivateIp(ip)) {
+      IP_CACHE.set(hostname, { ip, expires: Date.now() + CACHE_TTL });
+      console.log(`[DNS] System resolver: ${hostname} -> ${ip}`);
+      return ip;
+    } else {
+      console.log(`[DNS] System resolver returned private IP (${ip}), likely filtered, trying DoH...`);
+    }
   } catch (err) {
-    console.log(`[DNS] System resolver failed for ${hostname}: ${err.code}`);
+    console.log(`[DNS] System resolver failed: ${err.code}`);
   }
 
-  // Try alternative DNS servers
+  // Try DNS-over-HTTPS (bypasses ISP DNS filtering)
+  for (const dnsConfig of ALTERNATIVE_DNS) {
+    if (!dnsConfig.doh) continue;
+    try {
+      const ip = await resolveViaDOH(hostname, dnsConfig.doh);
+      if (ip && !isPrivateIp(ip)) {
+        IP_CACHE.set(hostname, { ip, expires: Date.now() + CACHE_TTL });
+        console.log(`[DNS] ${dnsConfig.name} DoH: ${hostname} -> ${ip}`);
+        return ip;
+      }
+    } catch (err) {
+      console.log(`[DNS] ${dnsConfig.name} DoH failed: ${err.message}`);
+    }
+  }
+
+  // Try standard DNS resolution as fallback
   for (const dnsConfig of ALTERNATIVE_DNS) {
     try {
       const ip = await resolveThroughDns(hostname, dnsConfig.servers);
-      if (ip) {
+      if (ip && !isPrivateIp(ip)) {
         IP_CACHE.set(hostname, { ip, expires: Date.now() + CACHE_TTL });
         console.log(`[DNS] ${dnsConfig.name}: ${hostname} -> ${ip}`);
         return ip;
@@ -58,6 +112,22 @@ export async function resolveWithFallback(hostname) {
 
   // If all DNS methods fail, throw error
   throw new Error(`DNS resolution failed for ${hostname}`);
+}
+
+/**
+ * Check if IP is in private range (likely a filter redirect)
+ */
+function isPrivateIp(ip) {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4) return false;
+  
+  return (
+    (parts[0] === 10) ||                           // 10.0.0.0/8
+    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||  // 172.16.0.0/12
+    (parts[0] === 192 && parts[1] === 168) ||     // 192.168.0.0/16
+    (parts[0] === 127) ||                          // 127.0.0.0/8 (localhost)
+    (parts[0] === 169 && parts[1] === 254)        // 169.254.0.0/16 (link-local)
+  );
 }
 
 /**

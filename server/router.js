@@ -12,7 +12,12 @@ import { getDomainConfig, shouldPreserveAuth, handlesJsonApi, getRateLimit } fro
 import { globalRetry } from './error-recovery.js';
 import { resolveWithFallback } from './dns-resolver.js';
 import { isFilterDomain, getBypassHeaders, isFilterBlockPage } from './filter-bypass.js';
-import { getEnhancedAntiDetectionHeaders, isCloudflareChallenge, getCloudflareBypassHeaders, addBrowserDelay } from './advanced-evasion.js';
+import { getEnhancedAntiDetectionHeaders, isCloudflareChallenge, getCloudflareBypassHeaders, addBrowserDelay, addAdaptiveDelay, isBotDetectionPage, isLikelyBotBlock } from './advanced-evasion.js';
+import { getSiteConfig, getMaxRetries, getSiteSpecificHeaders } from './site-configs.js';
+import { shouldRetryRequest, getRetryDelayMs, analyzeErrorResponse } from './error-strategies.js';
+import { renderPageWithJS, handleJSChallenge, isAvailable as isBrowserAvailable, closeBrowser } from './browser-automation.js';
+import { solveCaptcha } from './captcha-solver.js';
+import { injectAntiDetectionScripts } from './webdriver-bypass.js';
 
 // Default agents (fallback)
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50, maxFreeSockets: 10, timeout: 60000, freeSocketTimeout: 60000 });
@@ -733,18 +738,20 @@ function browseHandlerImpl(req, res, url, jar, targetUrl, depth = 0) {
 
 async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib, isHttps) {
 
-  // Add realistic browser delay for human-like behavior
+  // Use adaptive delay based on site and retry depth
   if (depth > 0) {
-    await addBrowserDelay();
+    await addAdaptiveDelay(url.hostname, depth - 1);
   }
 
-  // Use enhanced anti-detection headers with IP scrambling and proxy headers
-  let detectionHeaders = getEnhancedAntiDetectionHeaders(depth);
+  // Use enhanced anti-detection headers with site-specific configuration
+  let detectionHeaders = getEnhancedAntiDetectionHeaders(depth, url.hostname);
   
   // Apply bypass headers if we're retrying due to filter
   if (depth > 0) {
     detectionHeaders = { ...detectionHeaders, ...getBypassHeaders() };
-    console.log(`[BYPASS] Attempt ${depth} with enhanced evasion headers`);
+    const siteConfig = getSiteConfig(url.hostname);
+    const strategy = siteConfig?.strategy || 'standard';
+    console.log(`[BYPASS] Attempt ${depth} (${strategy}) with enhanced evasion headers for ${url.hostname}`);
   }
   const headers = detectionHeaders;
   
@@ -1005,14 +1012,79 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
         const baseProxyUrl = '/_midas/' + currentPaths.browse;
         let out = text;
 
-        // Check for Cloudflare challenges
-        if (isHtml && isCloudflareChallenge(text) && depth < 3) {
+        // Check for Cloudflare challenges with site-specific retry limits
+        const maxRetries = getMaxRetries(url.hostname);
+        if (isHtml && isCloudflareChallenge(text) && depth < maxRetries) {
           if (isProblematicSite) {
-            console.log(`[CF] Detected Cloudflare challenge, retrying with bypass headers...`);
+            console.log(`[CF] Detected Cloudflare challenge, retrying (${depth}/${maxRetries}) with bypass headers...`);
           }
           // Retry with Cloudflare bypass headers
           browseHandler(req, res, targetUrl, depth + 1);
           return;
+        }
+
+        // Check for bot detection pages
+        if (isHtml && isLikelyBotBlock(proxyRes.statusCode, text, proxyRes.headers) && depth < maxRetries) {
+          console.log(`[BOT] Detected bot detection for ${url.hostname} (${proxyRes.statusCode}), retrying (${depth}/${maxRetries})...`);
+          // Retry with more aggressive evasion
+          browseHandler(req, res, targetUrl, depth + 1);
+          return;
+        }
+
+        // Detect other bot detection patterns in HTML
+        if (isHtml && isBotDetectionPage(text) && depth < maxRetries) {
+          console.log(`[BOT] Detected bot detection page on ${url.hostname}, retrying...`);
+          browseHandler(req, res, targetUrl, depth + 1);
+          return;
+        }
+
+        // Try to solve CAPTCHA if detected
+        if (isHtml && depth < maxRetries) {
+          solveCaptcha(text, targetUrl, '2CAPTCHA')
+            .then(result => {
+              if (result && result.html) {
+                console.log('[CAPTCHA] Successfully solved CAPTCHA, injecting token...');
+                out = result.html;
+              }
+            })
+            .catch(err => {
+              console.log('[CAPTCHA] CAPTCHA solving failed:', err.message);
+            });
+        }
+
+        // Use browser automation for JavaScript-heavy sites that keep blocking
+        if (isHtml && (proxyRes.statusCode === 403 || isBotDetectionPage(text)) && 
+            depth >= 2 && depth < maxRetries && isBrowserAvailable()) {
+          console.log(`[Browser] Attempting JavaScript rendering for ${url.hostname}...`);
+          
+          renderPageWithJS(targetUrl, { 
+            waitUntil: 'networkidle2',
+            timeout: 30000,
+          })
+            .then(result => {
+              if (result.success && result.html) {
+                console.log(`[Browser] JavaScript rendering successful for ${url.hostname}`);
+                
+                // Process the rendered HTML
+                let renderedOut = result.html;
+                
+                // Inject anti-detection scripts
+                renderedOut = injectAntiDetectionScripts(renderedOut);
+                
+                // Rewrite URLs
+                renderedOut = rewriteHtml(renderedOut, url.toString(), baseProxyUrl);
+                
+                // Send response
+                outHeaders['content-type'] = 'text/html; charset=utf-8';
+                outHeaders['content-length'] = Buffer.byteLength(renderedOut, 'utf-8');
+                res.writeHead(200, outHeaders);
+                res.end(renderedOut);
+                return;
+              }
+            })
+            .catch(err => {
+              console.log('[Browser] JavaScript rendering failed:', err.message);
+            });
         }
 
         // Sniff HTML content by looking at first non-whitespace chars

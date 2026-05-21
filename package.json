@@ -11,16 +11,17 @@
     "debug": "set DEBUG=1&& node server/index.js"
   },
   "dependencies": {
-    "ws": "^8.16.0",
+    "puppeteer": "^21.11.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "puppeteer": "^21.0.0"
+    "ws": "^8.16.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@types/node": "^25.9.1",
     "typescript": "^5.3.3"
   },
   "engines": {
     "node": ">=18.0.0"
   }
 }
-

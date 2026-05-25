@@ -855,6 +855,11 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
   // Build cookie header from the server-side jar (cookies received via Set-Cookie)
   const jarCookieHeader = buildCookieHeader(jar, url.hostname, url.pathname, isHttps);
 
+  // DEBUG: log cookie state for vortexos.net requests
+  if (url.hostname === 'vortexos.net') {
+    console.log(`[COOKIE-DEBUG] ${req.method} ${url.pathname} | browser: "${req.headers['cookie'] || ''}" | jar: "${jarCookieHeader}"`);
+  }
+
   // Also forward browser cookies from the incoming request.
   // When a proxied page does `document.cookie = 'token=...'` the browser stores
   // the cookie under the proxy's origin and sends it back on every proxy request

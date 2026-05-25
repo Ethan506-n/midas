@@ -290,6 +290,42 @@
     location.replace = function (url) { return origReplaceLoc(toProxy(url)); };
   } catch (e) {}
 
+  // ── location.href setter interception ─────────────────────────────────────
+  // Intercepts `location.href = url` and `document.location.href = url`.
+  // NOTE: setting location.href does NOT call location.assign() internally in
+  // browser engines, so overriding assign() alone is not enough.
+  try {
+    var _locProto = Object.getPrototypeOf(location);
+    var _hrefDesc = Object.getOwnPropertyDescriptor(_locProto, 'href');
+    if (_hrefDesc && _hrefDesc.set) {
+      var _origHrefSet = _hrefDesc.set;
+      var _origHrefGet = _hrefDesc.get;
+      Object.defineProperty(_locProto, 'href', {
+        get: function () { return _origHrefGet.call(this); },
+        set: function (url) {
+          try { url = toProxy(String(url)); } catch (e2) {}
+          _origHrefSet.call(this, url);
+        },
+        configurable: true,
+      });
+    }
+  } catch (e) {}
+
+  // ── window.location setter interception ───────────────────────────────────
+  // Intercepts `window.location = url` (same effect as location.href = url).
+  try {
+    var _origLocationObj = window.location;
+    var _safeAssign = (typeof origAssign === 'function') ? origAssign : location.assign.bind(location);
+    Object.defineProperty(window, 'location', {
+      get: function () { return _origLocationObj; },
+      set: function (url) {
+        try { url = toProxy(String(url)); } catch (e2) {}
+        _safeAssign(url);
+      },
+      configurable: true,
+    });
+  } catch (e) {}
+
   // ── fetch() interception ──────────────────────────────────────────────────
 
   var _origFetch = window.fetch;

@@ -243,9 +243,14 @@
     if (!el) return;
     var href = el.getAttribute('href');
     if (!href || href.indexOf('javascript:') === 0 || href.charAt(0) === '#') return;
+    // Already patched — let the browser follow the proxied href naturally.
+    // Do NOT stopPropagation so the site's own click handlers still fire.
     if (href.indexOf('/_midas/') !== -1) return;
+    // Unpatched anchor: prevent the browser from navigating to the raw URL
+    // and route through the proxy. We do NOT call stopPropagation so the
+    // site's JS handlers still get a chance to run (they are caught by our
+    // location.href / history.pushState overrides above if they also navigate).
     e.preventDefault();
-    e.stopPropagation();
     window.location.href = toProxy(href);
   }, true);
 

@@ -4,18 +4,19 @@
  * Used when HTTP-only requests fail on JavaScript-heavy sites
  */
 
+import puppeteerExtra from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import * as webdriverBypass from './webdriver-bypass.js';
+import * as ipProvider from './ip-provider.js';
+
 let puppeteer;
 try {
-  puppeteer = require('puppeteer-extra');
-  const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+  puppeteer = puppeteerExtra;
   puppeteer.use(StealthPlugin());
 } catch (e) {
   console.warn('[Browser Automation] Puppeteer not installed. JavaScript rendering will be disabled.');
   puppeteer = null;
 }
-
-const webdriverBypass = require('./webdriver-bypass');
-const ipProvider = require('./ip-provider');
 
 // Browser pool to reuse browser instances
 let browserInstance = null;
@@ -93,6 +94,9 @@ async function getPage(browser) {
     eval(webdriverBypass.WEBDRIVER_BYPASS_SCRIPT);
     eval(webdriverBypass.ADVANCED_ANTI_DETECTION_SCRIPT);
   });
+  
+  // Enable request interception BEFORE setting up request handlers
+  await page.setRequestInterception(true);
   
   // Block images and stylesheets to speed up loading
   await page.on('request', (request) => {
@@ -282,7 +286,7 @@ function isAvailable() {
   return puppeteer !== null;
 }
 
-module.exports = {
+export {
   initBrowser,
   getPage,
   releasePage,

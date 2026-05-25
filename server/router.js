@@ -389,15 +389,25 @@ function rewriteJs(js, baseUrl) {
       const abs = resolveUrl(baseUrl, u);
       if (!abs) return m;
       return 'fetch("' + toProxyUrl(abs) + '"';
+    } else if (u.startsWith('/') || u.startsWith('./') || u.startsWith('../')) {
+      // Relative URL - resolve from baseUrl
+      const abs = resolveUrl(baseUrl, u);
+      if (!abs) return m;
+      return 'fetch("' + toProxyUrl(abs) + '"';
     }
     return m;
   });
 
-  // XMLHttpRequest.open("METHOD", "url")
+  // XMLHttpRequest.open("METHOD", "url") - handle relative URLs
   js = js.replace(/\.open\s*\(\s*("(?:[^"]*)"|'(?:[^']*)')\s*,\s*("([^"]+)"|'([^']+)')/g, (m, method, _q, dq, sq) => {
     const u = (dq ?? sq ?? '').trim();
     if (!u || isAlreadyProxied(u)) return m;
     if (/^https?:\/\//i.test(u) || u.startsWith('//')) {
+      const abs = resolveUrl(baseUrl, u);
+      if (!abs) return m;
+      return '.open(' + method + ', "' + toProxyUrl(abs) + '"';
+    } else if (u.startsWith('/') || u.startsWith('./') || u.startsWith('../')) {
+      // Relative URL - resolve from baseUrl
       const abs = resolveUrl(baseUrl, u);
       if (!abs) return m;
       return '.open(' + method + ', "' + toProxyUrl(abs) + '"';
@@ -427,22 +437,34 @@ function rewriteJs(js, baseUrl) {
     return m;
   });
 
-  // location.href = "url" / document.location.href = "url" / window.location.href = "url"
+  // location.href = "url" / document.location.href = "url" / window.location.href = "url" - BOTH absolute AND relative
   js = js.replace(/\blocation(?:\s*\.\s*href)?\s*=\s*("([^"]+)"|'([^']+)')/g, (m, _q, dq, sq) => {
     const u = (dq ?? sq ?? '').trim();
     if (!u || isAlreadyProxied(u)) return m;
+    // Handle both absolute URLs and relative paths
     if (/^https?:\/\//i.test(u)) {
       return 'location.href="' + toProxyUrl(u) + '"';
+    } else if (u.startsWith('/') || u.startsWith('./') || u.startsWith('../')) {
+      // Relative URL - resolve from baseUrl
+      const abs = resolveUrl(baseUrl, u);
+      if (!abs) return m;
+      return 'location.href="' + toProxyUrl(abs) + '"';
     }
     return m;
   });
 
-  // location.assign("url") / location.replace("url")
+  // location.assign("url") / location.replace("url") - BOTH absolute AND relative
   js = js.replace(/\blocation\s*\.\s*(assign|replace)\s*\(\s*("([^"]+)"|'([^']+)')/g, (m, method, _q, dq, sq) => {
     const u = (dq ?? sq ?? '').trim();
     if (!u || isAlreadyProxied(u)) return m;
+    // Handle both absolute URLs and relative paths
     if (/^https?:\/\//i.test(u)) {
       return 'location.' + method + '("' + toProxyUrl(u) + '"';
+    } else if (u.startsWith('/') || u.startsWith('./') || u.startsWith('../')) {
+      // Relative URL - resolve from baseUrl
+      const abs = resolveUrl(baseUrl, u);
+      if (!abs) return m;
+      return 'location.' + method + '("' + toProxyUrl(abs) + '"';
     }
     return m;
   });
@@ -1004,13 +1026,18 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
       
       stream.on('error', () => { if (!res.headersSent) { res.writeHead(502); res.end('decode error'); } });
       
-      stream.on('end', () => {
+      stream.on('end', async () => {
         if (tooLarge || res.headersSent) return; // Already sent
         
         const buf = Buffer.concat(chunks);
         const text = decodeBody(buf, charset);
         const baseProxyUrl = '/_midas/' + currentPaths.browse;
         let out = text;
+
+        // Debug logging for failing sites
+        if (url.hostname.includes('reddit') || url.hostname.includes('stackoverflow')) {
+          console.log(`[DEBUG] ${url.hostname}: statusCode=${proxyRes.statusCode}, textLen=${text.length}, isHtml=${ct.includes('text/html') || ct.includes('application/xhtml')}, ct="${ct}"`);
+        }
 
         // Check for Cloudflare challenges with site-specific retry limits
         const maxRetries = getMaxRetries(url.hostname);
@@ -1023,46 +1050,19 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
           return;
         }
 
-        // Check for bot detection pages
-        if (isHtml && isLikelyBotBlock(proxyRes.statusCode, text, proxyRes.headers) && depth < maxRetries) {
-          console.log(`[BOT] Detected bot detection for ${url.hostname} (${proxyRes.statusCode}), retrying (${depth}/${maxRetries})...`);
-          // Retry with more aggressive evasion
-          browseHandler(req, res, targetUrl, depth + 1);
-          return;
-        }
-
-        // Detect other bot detection patterns in HTML
-        if (isHtml && isBotDetectionPage(text) && depth < maxRetries) {
-          console.log(`[BOT] Detected bot detection page on ${url.hostname}, retrying...`);
-          browseHandler(req, res, targetUrl, depth + 1);
-          return;
-        }
-
-        // Try to solve CAPTCHA if detected
-        if (isHtml && depth < maxRetries) {
-          solveCaptcha(text, targetUrl, '2CAPTCHA')
-            .then(result => {
-              if (result && result.html) {
-                console.log('[CAPTCHA] Successfully solved CAPTCHA, injecting token...');
-                out = result.html;
-              }
-            })
-            .catch(err => {
-              console.log('[CAPTCHA] CAPTCHA solving failed:', err.message);
-            });
-        }
-
-        // Use browser automation for JavaScript-heavy sites that keep blocking
-        if (isHtml && (proxyRes.statusCode === 403 || isBotDetectionPage(text)) && 
-            depth >= 2 && depth < maxRetries && isBrowserAvailable()) {
-          console.log(`[Browser] Attempting JavaScript rendering for ${url.hostname}...`);
-          
-          renderPageWithJS(targetUrl, { 
-            waitUntil: 'networkidle2',
-            timeout: 30000,
-          })
-            .then(result => {
-              if (result.success && result.html) {
+        // Check for bot detection pages - also check non-HTML responses for 403
+        if ((isHtml || proxyRes.statusCode === 403) && isLikelyBotBlock(proxyRes.statusCode, text, proxyRes.headers) && depth < maxRetries) {
+          // After 2 retries, try browser automation instead of more HTTP retries
+          if (depth >= 2 && isBrowserAvailable()) {
+            console.log(`[Browser] Switching to JavaScript rendering after ${depth} HTTP retries for ${url.hostname}...`);
+            
+            try {
+              const result = await renderPageWithJS(targetUrl, { 
+                waitUntil: 'networkidle2',
+                timeout: 30000,
+              });
+              
+              if (result && result.success && result.html) {
                 console.log(`[Browser] JavaScript rendering successful for ${url.hostname}`);
                 
                 // Process the rendered HTML
@@ -1081,10 +1081,38 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
                 res.end(renderedOut);
                 return;
               }
-            })
-            .catch(err => {
+            } catch (err) {
               console.log('[Browser] JavaScript rendering failed:', err.message);
-            });
+              // Fall through to continue retrying
+            }
+          }
+          
+          // Continue with HTTP retries if browser automation not attempted or failed
+          console.log(`[BOT] Detected bot detection for ${url.hostname} (${proxyRes.statusCode}), retrying (${depth}/${maxRetries})...`);
+          // Retry with more aggressive evasion
+          browseHandler(req, res, targetUrl, depth + 1);
+          return;
+        }
+
+        // Detect other bot detection patterns in HTML
+        if (isHtml && isBotDetectionPage(text) && depth < maxRetries) {
+          console.log(`[BOT] Detected bot detection page on ${url.hostname}, retrying...`);
+          browseHandler(req, res, targetUrl, depth + 1);
+          return;
+        }
+
+        // Try to solve CAPTCHA if detected and browser automation didn't work
+        if (isHtml && depth < maxRetries) {
+          try {
+            const captchaResult = await solveCaptcha(text, targetUrl, '2CAPTCHA');
+            if (captchaResult && captchaResult.html) {
+              console.log('[CAPTCHA] Successfully solved CAPTCHA, injecting token...');
+              out = captchaResult.html;
+            }
+          } catch (err) {
+            console.log('[CAPTCHA] CAPTCHA solving failed:', err.message);
+            // Fall through to normal response
+          }
         }
 
         // Sniff HTML content by looking at first non-whitespace chars

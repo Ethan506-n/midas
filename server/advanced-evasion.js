@@ -110,10 +110,13 @@ export function isBotDetectionPage(html) {
  * Check if response is likely a bot block
  */
 export function isLikelyBotBlock(statusCode, html, headers) {
-  // 403 Forbidden with no content is a bot block
+  // 403 Forbidden is almost always a bot block in proxy scenarios
   if (statusCode === 403) {
-    if (!html || html.length < 500) return true;
-    if (isBotDetectionPage(html)) return true;
+    // Small response or known bot detection page
+    if (!html || html.length < 500 || isBotDetectionPage(html)) return true;
+    // If response is HTML and not too large, treat as bot block
+    // (legitimate 403s in proxy contexts are rare)
+    if (html && html.toLowerCase().includes('<!doctype') && html.length < 10000) return true;
   }
   
   // Check for robot/bot headers

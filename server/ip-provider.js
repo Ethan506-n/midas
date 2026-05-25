@@ -162,7 +162,15 @@ function createProxyChain(depth = 3) {
   };
 }
 
-module.exports = {
+/**
+ * Unique IP Provider - Uses less-known, unblocked IP ranges
+ * Residential proxies from regional ISPs and lesser-known datacenters
+ * Rotates through verified, low-detection IPs
+ */
+
+// ... (rest of the content stays the same until the exports)
+
+export {
   generateUniqueIP,
   getRotatingResidentialIP,
   generateUniqueIPChain,

@@ -4,8 +4,8 @@
  * Supports: reCAPTCHA (v2/v3), hCaptcha, etc.
  */
 
-const http = require('http');
-const https = require('https');
+import http from 'http';
+import https from 'https';
 
 // CAPTCHA service configurations
 const CAPTCHA_SERVICES = {
@@ -357,7 +357,7 @@ async function solveCaptcha(html, pageUrl, serviceKey = '2CAPTCHA') {
   }
 }
 
-module.exports = {
+export {
   detectCaptchaType,
   extractRecaptchaSiteKey,
   extractHcaptchaSiteKey,

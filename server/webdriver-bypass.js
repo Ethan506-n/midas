@@ -278,7 +278,7 @@ function getPlaywrightStealthOptions() {
   };
 }
 
-module.exports = {
+export {
   WEBDRIVER_BYPASS_SCRIPT,
   ADVANCED_ANTI_DETECTION_SCRIPT,
   getWebDriverBypassPayload,

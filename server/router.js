@@ -852,7 +852,38 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
     }
   }
 
-  const cookieHeader = buildCookieHeader(jar, url.hostname, url.pathname, isHttps);
+  // Build cookie header from the server-side jar (cookies received via Set-Cookie)
+  const jarCookieHeader = buildCookieHeader(jar, url.hostname, url.pathname, isHttps);
+
+  // Also forward browser cookies from the incoming request.
+  // When a proxied page does `document.cookie = 'token=...'` the browser stores
+  // the cookie under the proxy's origin and sends it back on every proxy request
+  // via req.headers['cookie'].  We must forward these to the target site or
+  // server-side auth checks (e.g. vortexos.net checking for 'token') will fail.
+  const PROXY_ONLY_COOKIES = new Set(['midas_sid']);
+  const browserCookieStr = req.headers['cookie'] || '';
+  const browserForward = browserCookieStr
+    .split(';')
+    .map(s => s.trim())
+    .filter(s => {
+      const name = s.split('=')[0].trim();
+      return name && !PROXY_ONLY_COOKIES.has(name);
+    });
+
+  // Build a merged cookie string: jar cookies override browser cookies on conflict
+  const jarMap = new Map();
+  jarCookieHeader.split(';').map(s => s.trim()).filter(Boolean).forEach(s => {
+    const eq = s.indexOf('=');
+    if (eq > 0) jarMap.set(s.slice(0, eq).trim(), s);
+  });
+  const browserMap = new Map();
+  browserForward.forEach(s => {
+    const eq = s.indexOf('=');
+    if (eq > 0) browserMap.set(s.slice(0, eq).trim(), s);
+  });
+  // Start with browser cookies, then let jar cookies override
+  const merged = new Map([...browserMap, ...jarMap]);
+  const cookieHeader = [...merged.values()].join('; ');
   if (cookieHeader) headers['cookie'] = cookieHeader;
 
   const isCaptchaRequest = isCaptchaUrl(targetUrl);

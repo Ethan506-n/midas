@@ -252,6 +252,25 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
     });
   });
 
+  // Rewrite inline event handler attributes (onclick, onchange, onsubmit, etc.)
+  // MUST run BEFORE the href/src pass below, because the href/src regex would
+  // otherwise match `href = '/path'` *inside* onclick values and inject bare
+  // double-quotes that break the attribute's HTML structure.
+  html = html.replace(/\b(on[a-z]+)\s*=\s*"([^"]*)"/gi, (m, attr, code) => {
+    if (!code.trim()) return m;
+    const decoded = htmlDecode(code);
+    const rewritten = rewriteJs(decoded, baseUrl);
+    if (rewritten === decoded) return m;
+    return attr + '="' + rewritten.replace(/"/g, '&quot;') + '"';
+  });
+  html = html.replace(/\b(on[a-z]+)\s*=\s*'([^']*)'/gi, (m, attr, code) => {
+    if (!code.trim()) return m;
+    const decoded = htmlDecode(code);
+    const rewritten = rewriteJs(decoded, baseUrl);
+    if (rewritten === decoded) return m;
+    return attr + "='" + rewritten.replace(/'/g, '&#39;') + "'";
+  });
+
   // Rewrite href/src/action/formaction/poster/data attributes
   html = html.replace(
     /\b(href|src|action|formaction|poster|data|ping)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/gi,
@@ -299,23 +318,6 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
   html = html.replace(/\bstyle\s*=\s*'([^']*)'/gi, (m, css) => {
     const rewritten = rewriteCss(css, baseUrl);
     return "style='" + rewritten + "'";
-  });
-
-  // Rewrite inline event handler attributes (onclick, onchange, onsubmit, etc.)
-  // These are not covered by the <script> block pass above.
-  html = html.replace(/\b(on[a-z]+)\s*=\s*"([^"]*)"/gi, (m, attr, code) => {
-    if (!code.trim()) return m;
-    const decoded = htmlDecode(code);
-    const rewritten = rewriteJs(decoded, baseUrl);
-    if (rewritten === decoded) return m;
-    return attr + '="' + rewritten.replace(/"/g, '&quot;') + '"';
-  });
-  html = html.replace(/\b(on[a-z]+)\s*=\s*'([^']*)'/gi, (m, attr, code) => {
-    if (!code.trim()) return m;
-    const decoded = htmlDecode(code);
-    const rewritten = rewriteJs(decoded, baseUrl);
-    if (rewritten === decoded) return m;
-    return attr + "='" + rewritten.replace(/'/g, '&#39;') + "'";
   });
 
   // Rewrite url() outside of attributes (inline CSS background images etc.)

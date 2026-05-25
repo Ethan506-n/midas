@@ -301,6 +301,23 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
     return "style='" + rewritten + "'";
   });
 
+  // Rewrite inline event handler attributes (onclick, onchange, onsubmit, etc.)
+  // These are not covered by the <script> block pass above.
+  html = html.replace(/\b(on[a-z]+)\s*=\s*"([^"]*)"/gi, (m, attr, code) => {
+    if (!code.trim()) return m;
+    const decoded = htmlDecode(code);
+    const rewritten = rewriteJs(decoded, baseUrl);
+    if (rewritten === decoded) return m;
+    return attr + '="' + rewritten.replace(/"/g, '&quot;') + '"';
+  });
+  html = html.replace(/\b(on[a-z]+)\s*=\s*'([^']*)'/gi, (m, attr, code) => {
+    if (!code.trim()) return m;
+    const decoded = htmlDecode(code);
+    const rewritten = rewriteJs(decoded, baseUrl);
+    if (rewritten === decoded) return m;
+    return attr + "='" + rewritten.replace(/'/g, '&#39;') + "'";
+  });
+
   // Rewrite url() outside of attributes (inline CSS background images etc.)
   html = html.replace(/url\(\s*("([^"]*)"|'([^']*)'|([^)'"]\S*))\s*\)/gi, (m, _all, dq, sq, uq) => {
     const v = (dq ?? sq ?? uq ?? '').trim();

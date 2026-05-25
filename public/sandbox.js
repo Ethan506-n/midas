@@ -31,6 +31,104 @@
     }
   } catch (e) {}
 
+  // ── document.cookie interceptor ──────────────────────────────────────────
+  // Proxied pages may run inside a sandboxed iframe where document.cookie
+  // writes are silently blocked (sandbox inheritance / cross-site context).
+  // We mirror every cookie set by proxied JS through sessionStorage so it
+  // persists across page navigations and is always readable by the next page.
+  // SameSite=Strict is downgraded to SameSite=Lax so the cookie survives
+  // same-origin iframe navigations in cross-site top-level contexts.
+  try {
+    var _MIDAS_SS_KEY = '_midas_jar';
+    var _cookieHost = '';
+    try { if (BASE_URL) _cookieHost = new URL(BASE_URL).hostname; } catch(e2) {}
+
+    var _cookieProto = Document.prototype;
+    var _cookieDesc  = Object.getOwnPropertyDescriptor(_cookieProto, 'cookie');
+    if (!_cookieDesc) {
+      _cookieProto = HTMLDocument.prototype;
+      _cookieDesc  = Object.getOwnPropertyDescriptor(_cookieProto, 'cookie');
+    }
+
+    if (_cookieDesc && _cookieDesc.get && _cookieDesc.set) {
+      var _realCookieGet = _cookieDesc.get;
+      var _realCookieSet = _cookieDesc.set;
+
+      function _ssJarGet() {
+        try { return JSON.parse(sessionStorage.getItem(_MIDAS_SS_KEY) || '{}'); } catch(e2) { return {}; }
+      }
+      function _ssJarSet(obj) {
+        try { sessionStorage.setItem(_MIDAS_SS_KEY, JSON.stringify(obj)); } catch(e2) {}
+      }
+
+      // On every page load, replay cookies saved in previous pages of this
+      // session so the real cookie store has them (with SameSite=Lax).
+      (function _restoreJar() {
+        var jar = _ssJarGet();
+        for (var _cn in jar) {
+          try {
+            _realCookieSet.call(document,
+              jar[_cn].replace(/;\s*SameSite=Strict\b/gi, '; SameSite=Lax'));
+          } catch(e2) {}
+        }
+      })();
+
+      Object.defineProperty(_cookieProto, 'cookie', {
+        get: function () {
+          var real = '';
+          try { real = _realCookieGet.call(this); } catch(e2) {}
+          // Merge sessionStorage-backed cookies to fill gaps where the browser
+          // silently blocked the real cookie store.
+          var jar  = _ssJarGet();
+          var seen = {};
+          real.split(';').forEach(function (c) {
+            c = c.trim(); if (!c) return;
+            var i = c.indexOf('=');
+            if (i > 0) seen[c.slice(0, i).trim()] = true;
+          });
+          var extras = [];
+          for (var jn in jar) {
+            if (seen[jn]) continue;
+            var pair = jar[jn].split(';')[0].trim();
+            extras.push(pair);
+          }
+          return real + (real && extras.length ? '; ' : '') + extras.join('; ');
+        },
+        set: function (cookieStr) {
+          cookieStr = String(cookieStr);
+          // Downgrade SameSite=Strict → Lax for cross-site iframe compat.
+          var modified = cookieStr.replace(/;\s*SameSite=Strict\b/gi, '; SameSite=Lax');
+          try { _realCookieSet.call(this, modified); } catch(e2) {}
+          // Mirror into sessionStorage.
+          var nameVal = modified.split(';')[0].trim();
+          var ei = nameVal.indexOf('=');
+          if (ei > 0) {
+            var cname = nameVal.slice(0, ei).trim();
+            var cval  = nameVal.slice(ei + 1).trim();
+            var jar   = _ssJarGet();
+            if (cval) {
+              jar[cname] = modified;
+            } else {
+              delete jar[cname];
+            }
+            _ssJarSet(jar);
+            // Sync to server-side cookie jar so the proxy can forward the
+            // cookie to the target site on subsequent requests.
+            if (cval && _cookieHost && PROXY_BASE) {
+              try {
+                navigator.sendBeacon(
+                  PROXY_BASE + '/cookie-sync',
+                  JSON.stringify({ host: _cookieHost, cookie: cookieStr })
+                );
+              } catch(e2) {}
+            }
+          }
+        },
+        configurable: true,
+      });
+    }
+  } catch(e) {}
+
   // ── helpers ──────────────────────────────────────────────────────────────
 
   function toProxy(url) {

@@ -855,11 +855,6 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
   // Build cookie header from the server-side jar (cookies received via Set-Cookie)
   const jarCookieHeader = buildCookieHeader(jar, url.hostname, url.pathname, isHttps);
 
-  // DEBUG: log cookie state for vortexos.net requests
-  if (url.hostname === 'vortexos.net') {
-    console.log(`[COOKIE-DEBUG] ${req.method} ${url.pathname} | browser: "${req.headers['cookie'] || ''}" | jar: "${jarCookieHeader}"`);
-  }
-
   // Also forward browser cookies from the incoming request.
   // When a proxied page does `document.cookie = 'token=...'` the browser stores
   // the cookie under the proxy's origin and sends it back on every proxy request
@@ -1299,6 +1294,30 @@ export function router(req, res, url) {
       cache: getCacheStats(),
       timestamp: new Date().toISOString(),
     }));
+    return;
+  }
+
+  // ── cookie-sync: sandbox.js POSTs cookies that JS set on the proxied page
+  //    so the server-side jar can forward them to the target host.
+  if (pathname.endsWith('/cookie-sync')) {
+    const sid = getOrCreateSid(req, res);
+    const jar = jarFor(sid);
+    let body = '';
+    req.on('data', d => { body += d; });
+    req.on('end', () => {
+      try {
+        const { host, cookie } = JSON.parse(body);
+        if (host && cookie) {
+          // Parse the cookie string (name=value; attrs...) into a Set-Cookie-like entry
+          storeCookies(jar, host, [cookie.replace(/;\s*SameSite=Strict\b/gi, '; SameSite=Lax')]);
+        }
+      } catch (e) { /* ignore malformed */ }
+      res.writeHead(204, {
+        'access-control-allow-origin': req.headers.origin || '*',
+        'access-control-allow-credentials': 'true',
+      });
+      res.end();
+    });
     return;
   }
 

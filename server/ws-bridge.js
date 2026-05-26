@@ -43,6 +43,69 @@ function createServerWebSocket(targetUrl, headers) {
   });
 }
 
+/**
+ * Native WebSocket upgrade handler.
+ * Called by server.on('upgrade', ...) when the browser opens a real WebSocket
+ * to wss://proxy.dev/_midas/BROWSE?url=wss://target.com/...
+ * We complete the handshake with the browser, then relay the connection to the
+ * actual target over a real WebSocket, forwarding all frames bidirectionally.
+ */
+export function wsUpgradeHandler(req, socket, head) {
+  try {
+    const reqUrl = new URL(req.url, 'http://x');
+    const targetParam = reqUrl.searchParams.get('url');
+    if (!targetParam) { socket.destroy(); return; }
+
+    // Accept both https:// (MidasWebSocket converts wss→https before toProxy)
+    // and bare wss:// forms.
+    const targetUrl = targetParam
+      .replace(/^https:\/\//i, 'wss://')
+      .replace(/^http:\/\//i, 'ws://');
+
+    const targetHost = (() => {
+      try { return new URL(targetUrl.replace(/^wss?:/i, 'https:')).hostname; } catch { return ''; }
+    })();
+
+    // Upgrade the browser connection first, then connect to target.
+    const wss = new WebSocket.Server({ noServer: true });
+    wss.handleUpgrade(req, socket, head, (clientWs) => {
+      const targetWs = new WebSocket(targetUrl, {
+        rejectUnauthorized: false,
+        headers: {
+          'host':   targetHost,
+          'origin': 'https://' + targetHost,
+          'user-agent': req.headers['user-agent'] || 'Mozilla/5.0',
+        },
+      });
+
+      targetWs.once('open', () => {
+        clientWs.on('message', (data, isBinary) => {
+          if (targetWs.readyState === WebSocket.OPEN)
+            targetWs.send(data, { binary: isBinary });
+        });
+        targetWs.on('message', (data, isBinary) => {
+          if (clientWs.readyState === WebSocket.OPEN)
+            clientWs.send(data, { binary: isBinary });
+        });
+      });
+
+      // If target fails to open, close the client connection cleanly.
+      targetWs.once('error', (err) => {
+        console.error('[WS-PROXY] target connect error:', err.message);
+        try { clientWs.close(1011, 'upstream error'); } catch (_) {}
+      });
+
+      clientWs.on('close', (code, reason) => { try { targetWs.close(code, reason); } catch (_) {} });
+      targetWs.on('close', (code, reason) => { try { clientWs.close(code, reason); } catch (_) {} });
+      clientWs.on('error', () => { try { targetWs.close(1011); } catch (_) {} });
+      targetWs.on('error', () => { try { clientWs.close(1011); } catch (_) {} });
+    });
+  } catch (e) {
+    console.error('[WS-PROXY] upgrade handler error:', e.message);
+    try { socket.destroy(); } catch (_) {}
+  }
+}
+
 export function wsBridgeHandler(req, res, url) {
   const pathname = url.pathname;
 

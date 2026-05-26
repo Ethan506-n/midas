@@ -655,12 +655,18 @@
   var _OrigWebSocket = window.WebSocket;
   function MidasWebSocket(url, protocols) {
     try {
-      // Convert ws:// or wss:// to http:// or https:// for proxy
-      var httpUrl = url.replace(/^ws:\/\//i, 'http://').replace(/^wss:\/\//i, 'https://');
-      if (shouldProxy(httpUrl)) {
-        var proxied = toProxy(httpUrl);
-        // Convert back to ws:// via the proxy path (handled by ws-bridge on server)
-        url = proxied.replace(/^https?:/, location.protocol).replace(location.host, location.host);
+      if (typeof url === 'string' && /^wss?:\/\//i.test(url)) {
+        // Convert ws(s):// → http(s):// to run through shouldProxy / toProxy
+        var httpUrl = url.replace(/^wss:\/\//i, 'https://').replace(/^ws:\/\//i, 'http://');
+        if (shouldProxy(httpUrl)) {
+          var proxied = toProxy(httpUrl);
+          // proxied is a relative path like /_midas/BROWSE?url=...
+          // Build an absolute wss:// URL pointing at the REAL proxy host so the
+          // browser's WebSocket upgrade hits the proxy server (not vortexos.net).
+          var wsScheme = /^wss:\/\//i.test(url) ? 'wss:' : 'ws:';
+          var realHost = new URL(_REAL_ORIGIN).host;
+          url = wsScheme + '//' + realHost + proxied;
+        }
       }
     } catch (e) {}
     if (protocols !== undefined) {

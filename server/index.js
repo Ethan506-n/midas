@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { router } from './router.js';
+import { wsUpgradeHandler } from './ws-bridge.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.resolve(__dirname, '../public');
@@ -324,5 +325,22 @@ if (USE_HTTP2) {
   server = http.createServer(handler);
   console.log(`Midas server listening on HTTP/1.1 ${HOST}:${PORT}`);
 }
+
+// Proxy native WebSocket upgrades (e.g. socket.io, Firebase RTDB, etc.)
+// MidasWebSocket in sandbox.js rewrites wss://target.com/... to
+// wss://proxy.dev/_midas/BROWSE?url=https://target.com/...  so the upgrade
+// request arrives here.  We relay it transparently to the real target.
+server.on('upgrade', (req, socket, head) => {
+  try {
+    const reqUrl = new URL(req.url, 'http://x');
+    if (reqUrl.pathname.startsWith('/_midas/') && reqUrl.searchParams.has('url')) {
+      wsUpgradeHandler(req, socket, head);
+    } else {
+      socket.destroy();
+    }
+  } catch (e) {
+    try { socket.destroy(); } catch (_) {}
+  }
+});
 
 server.listen(PORT, HOST);

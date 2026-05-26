@@ -362,17 +362,57 @@
   }, true);
 
   // ── History interception ──────────────────────────────────────────────────
+  // SPA sites call history.pushState to do client-side routing without a page
+  // reload. If we rewrite the URL to the proxy format (/_midas/BROWSE?url=...)
+  // the SPA's own router reads location.pathname as "/_midas/BROWSE" instead of
+  // "/app/chat" and can't match any route → white screen.
+  //
+  // Rule: if the pushed URL resolves to the *same origin as the current target
+  // site*, it is SPA routing — keep the original URL so the SPA router works,
+  // but update BASE_URL so our fetch/XHR hooks still resolve to the right host.
+  // Only rewrite cross-origin pushState URLs through the proxy.
 
-  var origPush = history.pushState.bind(history);
+  var origPush    = history.pushState.bind(history);
   var origReplace = history.replaceState.bind(history);
+
+  function _spaStateUrl(url) {
+    if (!url) return url;
+    try {
+      var base       = BASE_URL || location.href;
+      var baseOrigin = new URL(base).origin;
+      var abs        = new URL(String(url), base).href;
+      var absOrigin  = new URL(abs).origin;
+      // Same target-site origin → SPA routing; update BASE_URL, keep URL as-is.
+      if (absOrigin === baseOrigin && abs.indexOf('/_midas/') === -1) {
+        BASE_URL = abs;
+        return url;
+      }
+    } catch (e2) {}
+    return toProxy(url);
+  }
+
   history.pushState = function (state, title, url) {
-    if (url) url = toProxy(url);
+    if (url) url = _spaStateUrl(url);
     return origPush(state, title, url);
   };
   history.replaceState = function (state, title, url) {
-    if (url) url = toProxy(url);
+    if (url) url = _spaStateUrl(url);
     return origReplace(state, title, url);
   };
+
+  // Re-sync BASE_URL when the user navigates back/forward through SPA history.
+  window.addEventListener('popstate', function () {
+    try {
+      var cur = location.pathname + location.search;
+      if (cur.indexOf('/_midas/') === 0) {
+        var p = new URLSearchParams(location.search).get('url');
+        if (p) BASE_URL = p;
+      } else if (BASE_URL) {
+        var bOrigin = new URL(BASE_URL).origin;
+        BASE_URL = new URL(cur || '/', bOrigin).href;
+      }
+    } catch (e) {}
+  });
 
   // ── window.open ───────────────────────────────────────────────────────────
 

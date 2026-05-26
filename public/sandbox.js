@@ -241,8 +241,18 @@
     var href = a.getAttribute('href');
     if (!href || href.indexOf('javascript:') === 0 || href.charAt(0) === '#') return;
     if (href.indexOf('/_midas/') !== -1) return;
-    a.setAttribute('data-midas-orig', href);
-    a.setAttribute('href', toProxy(href));
+    // Only rewrite absolute cross-origin URLs (http/https or protocol-relative).
+    // Relative paths (e.g. "/app/chat", "./page") must NOT be rewritten here because
+    // SPA frameworks (React Router, Vue Router, etc.) read the DOM .href property
+    // from the <a> element to determine the navigation target. If we rewrite it to a
+    // /_midas/ proxy URL, the SPA router pushes that proxy path as the route, which
+    // matches nothing and causes a white screen. Relative paths are handled either by
+    // the SPA's own router (via our history.pushState override) or by the click
+    // handler fallback below.
+    if (/^https?:\/\//i.test(href) || href.indexOf('//') === 0) {
+      a.setAttribute('data-midas-orig', href);
+      a.setAttribute('href', toProxy(href));
+    }
     a.__midas_patched = true;
   }
 
@@ -346,15 +356,32 @@
     if (!el) return;
     var href = el.getAttribute('href');
     if (!href || href.indexOf('javascript:') === 0 || href.charAt(0) === '#') return;
-    // Already patched — let the browser follow the proxied href naturally.
-    // Do NOT stopPropagation so the site's own click handlers still fire.
+    // Already proxied — let the browser follow the href naturally.
     if (href.indexOf('/_midas/') !== -1) return;
-    // Unpatched anchor: prevent the browser from navigating to the raw URL
-    // and route through the proxy. We do NOT call stopPropagation so the
-    // site's JS handlers still get a chance to run (they are caught by our
-    // location.href / history.pushState overrides above if they also navigate).
-    e.preventDefault();
-    window.location.href = toProxy(href);
+
+    // Absolute cross-origin URL not yet patched (patchAnchor may have missed it).
+    if (/^https?:\/\//i.test(href) || href.indexOf('//') === 0) {
+      e.preventDefault();
+      window.location.href = toProxy(href);
+      return;
+    }
+
+    // Relative URL (e.g. "/app/chat", "./page").
+    // These are same-site navigations. For SPAs (React Router, Vue Router, etc.)
+    // we must NOT intercept here — their bubble-phase click handler calls
+    // e.preventDefault() + history.push(), and our history.pushState override
+    // handles the rest. Intercepting in capture phase (before the SPA handler)
+    // would either corrupt the route or force a full page reload, causing a
+    // white screen when the SPA's session/auth state is lost.
+    //
+    // For plain multi-page sites every anchor href was already rewritten to a
+    // /_midas/ URL server-side (rewriteHtml), so they never reach this branch.
+    // The only relative hrefs that arrive here are dynamically injected by a
+    // SPA, so we let them propagate naturally. If the SPA's router handles the
+    // click (preventDefault + pushState) our overrides keep everything proxied.
+    // If no SPA router claims the click the browser will navigate to the
+    // relative path on the proxy server; our location.href setter will catch
+    // any programmatic location.href = '...' assignment and proxy it.
   }, true);
 
   document.addEventListener('submit', function (e) {

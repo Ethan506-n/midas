@@ -31,6 +31,11 @@
     }
   } catch (e) {}
 
+  // Cache the REAL proxy origin before any location virtualisation below.
+  // toProxy/shouldProxy must always compare against the proxy server's actual
+  // origin (not the virtualised target-site origin) or they'd stop proxying.
+  var _REAL_ORIGIN = location.origin;
+
   // ── document.cookie interceptor ──────────────────────────────────────────
   // Proxied pages may run inside a sandboxed iframe where document.cookie
   // writes are silently blocked (sandbox inheritance / cross-site context).
@@ -150,9 +155,9 @@
       var abs = new URL(url, base).href;
       // Don't proxy same-origin /_midas/ paths
       var parsed = new URL(abs);
-      if (parsed.origin === location.origin && parsed.pathname.indexOf('/_midas/') === 0) return url;
+      if (parsed.origin === _REAL_ORIGIN && parsed.pathname.indexOf('/_midas/') === 0) return url;
       // Don't proxy same-origin non-proxy paths (static assets served by the proxy server itself)
-      if (parsed.origin === location.origin && parsed.pathname.indexOf('/_midas/') === -1) return url;
+      if (parsed.origin === _REAL_ORIGIN && parsed.pathname.indexOf('/_midas/') === -1) return url;
       return PROXY_BASE + '?url=' + encodeURIComponent(abs);
     } catch (e) { return url; }
   }
@@ -174,7 +179,7 @@
       var abs = new URL(url, base).href;
       var parsed = new URL(abs);
       // If same-origin as the proxy server, let it pass through
-      if (parsed.origin === location.origin) return false;
+      if (parsed.origin === _REAL_ORIGIN) return false;
       return true;
     } catch (e) { return false; }
   }
@@ -401,15 +406,20 @@
   };
 
   // Re-sync BASE_URL when the user navigates back/forward through SPA history.
+  // Must use the real (non-virtualised) href so we get the actual new path
+  // rather than the stale BASE_URL value the virtualiser would return.
   window.addEventListener('popstate', function () {
     try {
-      var cur = location.pathname + location.search;
-      if (cur.indexOf('/_midas/') === 0) {
-        var p = new URLSearchParams(location.search).get('url');
+      var realHref = (_origHrefGet ? _origHrefGet.call(location) : null) || '';
+      if (!realHref) return;
+      var realUrl  = new URL(realHref);
+      var realPath = realUrl.pathname + realUrl.search;
+      if (realPath.indexOf('/_midas/') === 0) {
+        var p = realUrl.searchParams.get('url');
         if (p) BASE_URL = p;
       } else if (BASE_URL) {
         var bOrigin = new URL(BASE_URL).origin;
-        BASE_URL = new URL(cur || '/', bOrigin).href;
+        BASE_URL = new URL(realPath || '/', bOrigin).href;
       }
     } catch (e) {}
   });
@@ -444,7 +454,11 @@
       var _origHrefSet = _hrefDesc.set;
       var _origHrefGet = _hrefDesc.get;
       Object.defineProperty(_locProto, 'href', {
-        get: function () { return _origHrefGet.call(this); },
+        get: function () {
+          // Return the target-site URL so SPAs see the right full URL.
+          if (BASE_URL) return BASE_URL;
+          return _origHrefGet.call(this);
+        },
         set: function (url) {
           try { url = toProxy(String(url)); } catch (e2) {}
           _origHrefSet.call(this, url);
@@ -467,6 +481,36 @@
       },
       configurable: true,
     });
+  } catch (e) {}
+
+  // ── location property virtualiser ────────────────────────────────────────
+  // When the proxy serves a page at /_midas/BROWSE?url=https://site.com/app/chat
+  // the SPA reads location.pathname as '/_midas/BROWSE' and can't route.
+  // We override pathname/search/hostname/host/origin/protocol/port on
+  // Location.prototype to return target-site values derived from BASE_URL.
+  // The href getter was already updated above; the setters still proxy correctly.
+  try {
+    var _lvProto = Object.getPrototypeOf(location);
+    var _lvProps = ['pathname', 'search', 'hash', 'hostname', 'host', 'port', 'protocol', 'origin'];
+    for (var _lvi = 0; _lvi < _lvProps.length; _lvi++) {
+      (function (prop) {
+        var desc = Object.getOwnPropertyDescriptor(_lvProto, prop);
+        if (!desc || !desc.get) return;
+        var _realGet = desc.get;
+        Object.defineProperty(_lvProto, prop, {
+          get: function () {
+            if (BASE_URL) {
+              try {
+                var t = new URL(BASE_URL);
+                if (t[prop] !== undefined) return t[prop];
+              } catch (e2) {}
+            }
+            return _realGet.call(this);
+          },
+          configurable: true,
+        });
+      })(_lvProps[_lvi]);
+    }
   } catch (e) {}
 
   // ── fetch() interception ──────────────────────────────────────────────────

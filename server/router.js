@@ -67,6 +67,18 @@ function isAlreadyProxied(v) {
   return typeof v === 'string' && (v.includes('/_midas/') || v.startsWith('/_midas/'));
 }
 
+// URLs that must NOT be rewritten as string literals in JS because:
+//  - The SDK uses the raw URL as a base for WebSocket/gRPC endpoints, so
+//    replacing it with a /_midas/... path breaks its URL construction.
+//  - The runtime hooks in sandbox.js (fetch, WebSocket interceptors) already
+//    route these domains through the proxy at call time.
+function isSDKUrl(url) {
+  try {
+    const host = new URL(url).hostname;
+    return /(?:^|\.)(firebaseio\.com|firebaseapp\.com|firebase\.google\.com|firestore\.googleapis\.com|identitytoolkit\.googleapis\.com|securetoken\.googleapis\.com|firebase\.googleapis\.com|cloudfunctions\.net|run\.app)$/.test(host);
+  } catch { return false; }
+}
+
 function extractOriginalFromProxy(u) {
   try {
     const parsed = new URL(u, 'http://x');
@@ -378,17 +390,17 @@ function rewriteJs(js, baseUrl) {
   // Use (?<!\\) lookbehind to avoid matching JSON-escaped \"url\" sequences (prevents %5C corruption)
   // Use [^"\\\s] to also exclude backslash from URL content
   js = js.replace(/(?<!\\)"(https?:\/\/[^"\\\s]{3,})(?<!\\)"/g, (m, u) => {
-    if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
+    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u)) return m;
     return '"' + toProxyUrl(u) + '"';
   });
   // Absolute URL strings in single quotes
   js = js.replace(/(?<!\\)'(https?:\/\/[^'\\\s]{3,})(?<!\\)'/g, (m, u) => {
-    if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
+    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u)) return m;
     return "'" + toProxyUrl(u) + "'";
   });
   // Absolute URL template literals (simple, no expressions)
   js = js.replace(/`(https?:\/\/[^`$\\\s]{3,})`/g, (m, u) => {
-    if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
+    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u)) return m;
     return '`' + toProxyUrl(u) + '`';
   });
 
@@ -731,6 +743,9 @@ function browseHandler(req, res, targetUrl, depth = 0) {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     res.writeHead(400, { 'content-type': 'text/plain' }); res.end('unsupported protocol'); return;
   }
+
+  // Path-level browse log — helps diagnose SPA navigation (e.g. /app/chat vs /)
+  if (depth === 0) console.log(`[BROWSE] ${url.hostname}${url.pathname}${url.search ? url.search.slice(0,40) : ''}`);
 
   // Check cache for GET requests BEFORE rate limiting
   if (req.method === 'GET') {

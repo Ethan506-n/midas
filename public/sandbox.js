@@ -552,6 +552,9 @@
   // the SPA reads location.pathname as '/_midas/BROWSE' and can't route.
   // We override pathname/search/hostname/host/origin/protocol/port on
   // Location.prototype to return target-site values derived from BASE_URL.
+  // pathname and search setters are also intercepted so that:
+  //   location.pathname = '/app/chat'  →  full proxy navigation
+  //   location.search   = '?q=hello'  →  full proxy navigation
   // The href getter was already updated above; the setters still proxy correctly.
   try {
     var _lvProto = Object.getPrototypeOf(location);
@@ -561,6 +564,22 @@
         var desc = Object.getOwnPropertyDescriptor(_lvProto, prop);
         if (!desc || !desc.get) return;
         var _realGet = desc.get;
+        var _realSet = desc.set || null;
+
+        var _navSetter = (prop === 'pathname' || prop === 'search') ? function (val) {
+          try {
+            var base = new URL(BASE_URL || (_origHrefGet ? _origHrefGet.call(location) : ''));
+            if (prop === 'pathname') { base.pathname = String(val); }
+            else { base.search = String(val); }
+            var _nav = PROXY_BASE + '?url=' + encodeURIComponent(base.href);
+            if (_origHrefSet) { _origHrefSet.call(location, _nav); }
+            else if (typeof origAssign === 'function') { origAssign(_nav); }
+            else { location.assign(_nav); }
+          } catch (e2) {
+            if (_realSet) { try { _realSet.call(this, val); } catch (e3) {} }
+          }
+        } : _realSet;
+
         Object.defineProperty(_lvProto, prop, {
           get: function () {
             if (BASE_URL) {
@@ -571,6 +590,7 @@
             }
             return _realGet.call(this);
           },
+          set: _navSetter || undefined,
           configurable: true,
         });
       })(_lvProps[_lvi]);

@@ -394,29 +394,52 @@
   }, true);
 
   // ── History interception ──────────────────────────────────────────────────
-  // SPA sites call history.pushState to do client-side routing without a page
-  // reload. If we rewrite the URL to the proxy format (/_midas/BROWSE?url=...)
-  // the SPA's own router reads location.pathname as "/_midas/BROWSE" instead of
-  // "/app/chat" and can't match any route → white screen.
+  // SPA sites call history.pushState for client-side routing.
   //
-  // Rule: if the pushed URL resolves to the *same origin as the current target
-  // site*, it is SPA routing — keep the original URL so the SPA router works,
-  // but update BASE_URL so our fetch/XHR hooks still resolve to the right host.
-  // Only rewrite cross-origin pushState URLs through the proxy.
+  // Previous approach: keep bare path (e.g. "/app/chat") as the browser URL.
+  // Problem: the proxy server has no handler for "/app/chat", so unintercepted
+  // native import() calls, workers, and other resources resolve against the
+  // proxy domain instead of through /_midas/ → React page bundle 404 → white
+  // screen.
+  //
+  // Correct approach: always navigate to /_midas/BROWSE?url=<full-target-url>
+  // for path/search changes. The location virtualiser already gives React Router
+  // the right location.pathname after the reload. Hash-only changes stay
+  // client-side (no reload needed).
 
   var origPush    = history.pushState.bind(history);
   var origReplace = history.replaceState.bind(history);
 
-  function _spaStateUrl(url) {
+  // Scheduled full-proxy navigation URL (set by _handleSpaNav, consumed by the
+  // pushState/replaceState wrappers after calling origPush/origReplace).
+  var _pendingNavUrl = null;
+
+  function _handleSpaNav(url) {
     if (!url) return url;
     try {
-      var base       = BASE_URL || location.href;
+      var base = BASE_URL || '';
+      try { if (!base && _origHrefGet) base = _origHrefGet.call(location); } catch(e3) {}
+      if (!base) return toProxy(url);
+
       var baseOrigin = new URL(base).origin;
       var abs        = new URL(String(url), base).href;
       var absOrigin  = new URL(abs).origin;
-      // Same target-site origin → SPA routing; update BASE_URL, keep URL as-is.
+
       if (absOrigin === baseOrigin && abs.indexOf('/_midas/') === -1) {
+        var baseParsed = new URL(base);
+        var absParsed  = new URL(abs);
+        var pathChanged = baseParsed.pathname !== absParsed.pathname ||
+                          baseParsed.search   !== absParsed.search;
+
         BASE_URL = abs;
+
+        if (pathChanged) {
+          // Path/search changed → schedule a full proxy navigation so all
+          // resource loads stay routed through /_midas/.
+          _pendingNavUrl = PROXY_BASE + '?url=' + encodeURIComponent(abs);
+        }
+        // Return the original url for the pushState call (the navigation below
+        // will supersede it, but we still want history to be consistent).
         return url;
       }
     } catch (e2) {}
@@ -424,17 +447,31 @@
   }
 
   history.pushState = function (state, title, url) {
-    if (url) url = _spaStateUrl(url);
-    return origPush(state, title, url);
+    if (url !== undefined && url !== null) url = _handleSpaNav(url);
+    var nav = _pendingNavUrl;
+    _pendingNavUrl = null;
+    try { origPush(state, title, url); } catch(e2) {}
+    if (nav) {
+      try {
+        if (_origHrefSet) { _origHrefSet.call(location, nav); }
+        else { location.assign(nav); }
+      } catch(e2) {}
+    }
   };
   history.replaceState = function (state, title, url) {
-    if (url) url = _spaStateUrl(url);
-    return origReplace(state, title, url);
+    if (url !== undefined && url !== null) url = _handleSpaNav(url);
+    var nav = _pendingNavUrl;
+    _pendingNavUrl = null;
+    try { origReplace(state, title, url); } catch(e2) {}
+    if (nav) {
+      try {
+        if (_origHrefSet) { _origHrefSet.call(location, nav); }
+        else { location.assign(nav); }
+      } catch(e2) {}
+    }
   };
 
   // Re-sync BASE_URL when the user navigates back/forward through SPA history.
-  // Must use the real (non-virtualised) href so we get the actual new path
-  // rather than the stale BASE_URL value the virtualiser would return.
   window.addEventListener('popstate', function () {
     try {
       var realHref = (_origHrefGet ? _origHrefGet.call(location) : null) || '';

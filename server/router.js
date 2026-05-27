@@ -405,12 +405,21 @@ function rewriteJs(js, baseUrl) {
   });
 
   // Protocol-relative URLs
-  js = js.replace(/(?<!\\)"(\/\/[^"\/\\\s][^"\\\s]{2,})(?<!\\)"/g, (m, u) => {
+  // Broaden matching and support both "//host/..." and '//host/...'.
+  js = js.replace(/(?<!\\)"(\/\/[^"\r\n]{2,})(?<!\\)"/g, (m, u) => {
     if (isAlreadyProxied(u)) return m;
     const abs = 'https:' + u;
-    if (isCaptchaUrl(abs)) return m;
+    if (isCaptchaUrl(abs) || isSDKUrl(abs)) return m;
     return '"' + toProxyUrl(abs) + '"';
   });
+
+  js = js.replace(/(?<!\\)'(\/\/[^'\r\n]{2,})(?<!\\)'/g, (m, u) => {
+    if (isAlreadyProxied(u)) return m;
+    const abs = 'https:' + u;
+    if (isCaptchaUrl(abs) || isSDKUrl(abs)) return m;
+    return "'" + toProxyUrl(abs) + "'";
+  });
+
 
   // fetch("url") and fetch('url') — including relative paths
   js = js.replace(/\bfetch\s*\(\s*("([^"]+)"|'([^']+)')/g, (m, _q, dq, sq) => {
@@ -1180,12 +1189,25 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
           }
         }
 
-        // Sniff HTML content by looking at first non-whitespace chars
+        // Sniff HTML content more reliably.
+        // Some sites start with comments/whitespace/extra tags before <!doctype>.
         let actuallyHtml = shouldRewriteHtml;
         if (!actuallyHtml && proxyRes.statusCode === 200 && buf.length > 0) {
-          const sniff = text.trim().substring(0, 20).toLowerCase();
-          actuallyHtml = sniff.startsWith('<!doctype') || sniff.startsWith('<html') || sniff.startsWith('<head') || sniff.startsWith('<body') || sniff.startsWith('<?xml');
+          const t = text.trim();
+          const head = t.substring(0, Math.min(t.length, 2048)).toLowerCase();
+          // If it even looks like HTML, prefer rewriting so links/assets get proxied.
+          actuallyHtml = (
+            head.startsWith('<!doctype') ||
+            head.startsWith('<html') ||
+            head.startsWith('<head') ||
+            head.startsWith('<body') ||
+            head.startsWith('<?xml') ||
+            head.includes('<html') ||
+            head.includes('<head') ||
+            head.includes('<body')
+          );
         }
+
 
         if (actuallyHtml) {
           out = rewriteHtml(text, url.toString(), baseProxyUrl);
@@ -1491,6 +1513,16 @@ export function router(req, res, url) {
         try {
           const targetOrigin = new URL(decodeURIComponent(refMatch[1])).origin;
           const reqUrl = new URL(req.url, 'http://x');
+
+          // Allow Socket.IO polling/handshake to reach the real backend.
+          // Without this, sites using socket.io fallback to repeated polling failures.
+          if (reqUrl.pathname.startsWith('/socket.io/')) {
+            const targetUrl = targetOrigin + req.url;
+            setCors(res);
+            browseHandler(req, res, targetUrl);
+            return;
+          }
+
           // Only proxy non-midas, non-sandbox paths
           if (!reqUrl.pathname.startsWith('/_midas/') &&
               reqUrl.pathname !== '/sandbox.js' &&

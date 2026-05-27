@@ -1,5 +1,5 @@
 (function(){
-const __MIDAS_NONCE__='665838c274e3b09b';
+const __MIDAS_NONCE__='1385a58e53f4e047';
 
 /* module: core/encoder.js */
 /**

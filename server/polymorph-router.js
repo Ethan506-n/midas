@@ -8,11 +8,13 @@ import crypto from 'crypto';
 
 const SEED_ROTATION_INTERVAL = 5 * 60 * 1000; // 5 minutes
 let currentSeed = crypto.randomBytes(16).toString('hex');
+let previousSeed = currentSeed; // kept valid for one grace epoch after rotation
 let seedCreated = Date.now();
 
 function rotateSeed() {
   const now = Date.now();
   if (now - seedCreated > SEED_ROTATION_INTERVAL) {
+    previousSeed = currentSeed; // old paths stay valid for one more epoch
     currentSeed = crypto.randomBytes(16).toString('hex');
     seedCreated = now;
   }
@@ -23,18 +25,24 @@ function derivePath(seed, name, length = 8) {
   return hash.slice(0, length);
 }
 
+function buildPaths(seed) {
+  return {
+    browse:      derivePath(seed, 'browse', 10),
+    session:     derivePath(seed, 'session', 10),
+    stream:      derivePath(seed, 'stream', 10),
+    fetch:       derivePath(seed, 'fetch', 10),
+    chunk:       derivePath(seed, 'chunk', 10),
+    proxy:       derivePath(seed, 'proxy', 10),
+    passthrough: derivePath(seed, 'passthrough', 10),
+    wsBridge:    derivePath(seed, 'wsbridge', 10),
+    noise:       derivePath(seed, 'noise', 10),
+  };
+}
+
 export function getEndpointPaths() {
   rotateSeed();
   return {
-    browse: derivePath(currentSeed, 'browse', 10),
-    session: derivePath(currentSeed, 'session', 10),
-    stream: derivePath(currentSeed, 'stream', 10),
-    fetch: derivePath(currentSeed, 'fetch', 10),
-    chunk: derivePath(currentSeed, 'chunk', 10),
-    proxy: derivePath(currentSeed, 'proxy', 10),
-    passthrough: derivePath(currentSeed, 'passthrough', 10),
-    wsBridge: derivePath(currentSeed, 'wsbridge', 10),
-    noise: derivePath(currentSeed, 'noise', 10),
+    ...buildPaths(currentSeed),
     seed: currentSeed,
     created: seedCreated,
   };
@@ -46,6 +54,14 @@ export function matchPolymorphicPath(pathname, paths) {
   for (const [name, p] of Object.entries(paths)) {
     if (name === 'seed' || name === 'created') continue;
     if (clean === p || clean.startsWith(p + '/')) return name;
+  }
+  // Grace period: also accept the previous epoch's paths so pages loaded just
+  // before a rotation can still navigate without a white-screen 404.
+  if (previousSeed !== currentSeed) {
+    const prev = buildPaths(previousSeed);
+    for (const [name, p] of Object.entries(prev)) {
+      if (clean === p || clean.startsWith(p + '/')) return name;
+    }
   }
   return null;
 }

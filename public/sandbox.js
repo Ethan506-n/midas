@@ -21,6 +21,32 @@
   var m = location.pathname.match(/^(\/_midas\/[^\/]+)/);
   var PROXY_BASE = m ? m[1] : '';
 
+  // Refresh PROXY_BASE from the fixed session endpoint so navigation still
+  // works after the polymorph seed rotates (every 5 min server-side).
+  // /_midas/session is a stable path that always returns current paths.
+  // shouldProxy() skips it (contains /_midas/) so it goes direct to proxy.
+  (function _scheduleProxyBaseRefresh() {
+    function _refreshProxyBase() {
+      try {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', '/_midas/session?t=chunked', true);
+        xhr.onload = function () {
+          try {
+            var data = JSON.parse(xhr.responseText);
+            if (data && data.paths && data.paths.browse) {
+              PROXY_BASE = '/_midas/' + data.paths.browse;
+            }
+          } catch (e2) {}
+        };
+        xhr.send();
+      } catch (e) {}
+    }
+    // First refresh after 200ms (page is fully initialised by then),
+    // then every 4 minutes to stay ahead of the 5-minute rotation.
+    setTimeout(_refreshProxyBase, 200);
+    setInterval(_refreshProxyBase, 4 * 60 * 1000);
+  })();
+
   // Read the target base URL from the script tag's data-base attribute
   var BASE_URL = '';
   try {

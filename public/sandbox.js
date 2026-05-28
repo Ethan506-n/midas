@@ -338,7 +338,11 @@
     if (node.tagName === 'IMG' || node.tagName === 'VIDEO' || node.tagName === 'AUDIO' || node.tagName === 'SOURCE') {
       var src = node.getAttribute('src');
       if (src && src.indexOf('/_midas/') === -1 && src.indexOf('data:') !== 0 && src.indexOf('blob:') !== 0) {
-        node.setAttribute('src', toProxy(src));
+        var absSrc = src;
+        if (!/^https?:\/\//i.test(src) && src.indexOf('//') !== 0) {
+          try { absSrc = new URL(src, BASE_URL || location.href).href; } catch (e2) { absSrc = ''; }
+        }
+        if (absSrc && shouldProxy(absSrc)) node.setAttribute('src', toProxy(absSrc));
       }
       var srcset = node.getAttribute('srcset');
       if (srcset) {

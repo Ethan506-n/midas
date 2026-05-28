@@ -1294,7 +1294,24 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
       });
     } else {
       res.writeHead(proxyRes.statusCode, outHeaders);
-      stream.pipe(res);
+      // Diagnostic: log socket.io / firebase WS-poll responses so we can see
+      // what event data is actually being delivered to the browser.
+      const isRealtime = url.pathname.startsWith('/socket.io/') ||
+        url.pathname.startsWith('/.ws') || url.pathname.startsWith('/ws');
+      if (isRealtime && req.method === 'GET') {
+        const teeChunks = [];
+        stream.on('data', (c) => { teeChunks.push(c); res.write(c); });
+        stream.on('end', () => {
+          const body = Buffer.concat(teeChunks).toString('utf8');
+          if (body && body.length > 2) {
+            console.log(`[RT POLL] ${url.hostname} status=${proxyRes.statusCode} len=${body.length} data="${body.slice(0, 120).replace(/[\x00-\x1f]/g, '·')}"`);
+          }
+          res.end();
+        });
+        stream.on('error', () => { try { res.end(); } catch (_) {} });
+      } else {
+        stream.pipe(res);
+      }
     }
   });
 
@@ -1308,7 +1325,11 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
     }
   });
 
-  proxyReq.setTimeout(30000, () => {
+  // Socket.io long-polling holds connections open for up to the server's
+  // pingInterval (default 25 s). Give it 65 s so we never kill a live poll.
+  const isSocketIoPath = url.pathname.startsWith('/socket.io/') ||
+    url.pathname.startsWith('/ws') || url.pathname.startsWith('/.ws');
+  proxyReq.setTimeout(isSocketIoPath ? 65000 : 30000, () => {
     if (isProblematicSite) console.error(`[${url.hostname}] Request socket timeout`);
     proxyReq.destroy();
     if (!res.headersSent) {

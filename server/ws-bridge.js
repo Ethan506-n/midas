@@ -147,6 +147,8 @@ export function wsUpgradeHandler(req, socket, head) {
       targetHeaders['sec-websocket-protocol'] = req.headers['sec-websocket-protocol'];
     }
 
+    console.log('[WS BRIDGE] target=' + targetUrl.slice(0, 100));
+
     // Complete the handshake with the browser first.
     const wss = new WebSocketServer({ noServer: true });
     wss.handleUpgrade(req, socket, head, (clientWs) => {
@@ -166,6 +168,7 @@ export function wsUpgradeHandler(req, socket, head) {
       });
 
       targetWs.once('open', () => {
+        console.log('[WS BRIDGE] target open: ' + targetUrl.slice(0, 80));
         targetOpen = true;
 
         // Flush any messages the client sent while we were connecting.

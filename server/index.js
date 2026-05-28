@@ -332,6 +332,7 @@ if (USE_HTTP2) {
 //   2. Bare path upgrade (socket.io WS transport on /socket.io/): use the
 //      session cookie to find the target origin and forward the upgrade there.
 server.on('upgrade', (req, socket, head) => {
+  console.log('[WS UPGRADE] url=' + req.url.slice(0, 120));
   try {
     const reqUrl = new URL(req.url, 'http://x');
     if (reqUrl.pathname.startsWith('/_midas/') && reqUrl.searchParams.has('url')) {
@@ -344,14 +345,16 @@ server.on('upgrade', (req, socket, head) => {
     const sid = sidMatch ? sidMatch[1] : null;
     if (sid && SESSION_TARGETS.has(sid)) {
       const { origin } = SESSION_TARGETS.get(sid);
-      // Rewrite the request URL to /_midas/BROWSE?url=<target origin + path>
       const targetUrl = origin + req.url;
+      console.log('[WS UPGRADE] session fallback → ' + targetUrl.slice(0, 100));
       req.url = '/_midas/browse?url=' + encodeURIComponent(targetUrl);
       wsUpgradeHandler(req, socket, head);
       return;
     }
+    console.log('[WS UPGRADE] no session → destroying socket. sid=' + (sidMatch?.[1] || 'none'));
     socket.destroy();
   } catch (e) {
+    console.error('[WS UPGRADE] error:', e.message);
     try { socket.destroy(); } catch (_) {}
   }
 });

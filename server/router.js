@@ -24,6 +24,15 @@ const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50, maxFreeSocke
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50, maxFreeSockets: 10, timeout: 60000, freeSocketTimeout: 60000 });
 const ACTIVE_TRANSPORTS = new Map();
 const COOKIE_JAR = new Map();
+// Maps session ID → { origin, ts } so the referer-based fallback can forward
+// socket.io / WebSocket / SPA asset requests to the right target even when the
+// browser strips the Referer path (e.g. Referrer-Policy: strict-origin).
+const SESSION_TARGETS = new Map();
+// Purge stale entries every 10 minutes (sessions older than 2 hours).
+setInterval(() => {
+  const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+  for (const [k, v] of SESSION_TARGETS) { if (v.ts < cutoff) SESSION_TARGETS.delete(k); }
+}, 10 * 60 * 1000);
 
 let currentPaths = getEndpointPaths();
 function refreshPaths() { currentPaths = getEndpointPaths(); }
@@ -758,6 +767,10 @@ function browseHandler(req, res, targetUrl, depth = 0) {
     res.writeHead(400, { 'content-type': 'text/plain' }); res.end('unsupported protocol'); return;
   }
 
+  // Track the most-recently visited target origin for this session so the
+  // referer-based fallback can forward socket.io/SPA requests without Referer.
+  SESSION_TARGETS.set(sid, { origin: url.origin, ts: Date.now() });
+
   // Path-level browse log — helps diagnose SPA navigation (e.g. /app/chat vs /)
   if (depth === 0) console.log(`[BROWSE] ${url.hostname}${url.pathname}${url.search ? url.search.slice(0,40) : ''}`);
 
@@ -1037,6 +1050,11 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
     delete outHeaders['cross-origin-resource-policy'];
     delete outHeaders['origin-agent-cluster'];
     delete outHeaders['permissions-policy'];
+    // Strip Referrer-Policy so the browser keeps its default (full URL for
+    // same-origin requests). This ensures our referer-based fallback handler
+    // receives the full /_midas/BROWSE?url=... path in the Referer header,
+    // which is needed to forward socket.io / SPA-asset requests correctly.
+    delete outHeaders['referrer-policy'];
     
     // Add CORS headers to ALL responses (images, fonts, stylesheets need this)
     outHeaders['access-control-allow-origin'] = '*';
@@ -1306,6 +1324,8 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
   }
 }
 
+export { SESSION_TARGETS };
+
 export function router(req, res, url) {
   setCors(res);
 
@@ -1505,39 +1525,60 @@ export function router(req, res, url) {
     return;
   }
 
-  // ── Referer-based fallback proxy ─────────────────────────────────────────
-  // When a proxied SPA (Next.js /_next/, Vite /assets/, Nuxt /_nuxt/, CRA /static/, etc.)
-  // dynamically loads resources using same-origin relative paths, those requests hit our
-  // server instead of the target site. We recover by using the Referer header to determine
-  // the target origin and transparently proxy the request there.
+  // ── Referer + session-based fallback proxy ──────────────────────────────
+  // Handles requests that reach the proxy server on non-/_midas/ paths.
+  // This covers:
+  //   • socket.io/engine.io polling (/socket.io/?EIO=...)
+  //   • SPA chunk loading (/_next/static/, /assets/, /_nuxt/, etc.)
+  //   • Any relative-URL fetch that a proxied page makes to its own origin
+  //
+  // Resolution order:
+  //   1. Referer header — parse /_midas/…?url=<target> from it (works when
+  //      the iframe referrerpolicy is NOT no-referrer and the site doesn't
+  //      send Referrer-Policy: no-referrer)
+  //   2. SESSION_TARGETS — the last origin browsed by this session cookie;
+  //      used as a reliable fallback when the Referer is stripped or absent.
   {
-    const referer = req.headers['referer'] || req.headers['referrer'] || '';
-    if (referer) {
-      const refMatch = referer.match(/\/_midas\/[^?#]+\?(?:[^&]*&)*url=([^&\s#]+)/);
-      if (refMatch) {
+    const reqUrl = new URL(req.url, 'http://x');
+    // Never intercept our own proxy paths or static assets.
+    const isOwnPath = reqUrl.pathname.startsWith('/_midas/') ||
+      reqUrl.pathname === '/sandbox.js' ||
+      reqUrl.pathname === '/loader.js' ||
+      reqUrl.pathname === '/sw.js' ||
+      reqUrl.pathname === '/demo.html' ||
+      reqUrl.pathname === '/manifest.json' ||
+      /^\/(favicon|midas\.client\.js)/.test(reqUrl.pathname);
+
+    if (!isOwnPath) {
+      let targetOrigin = null;
+
+      // 1. Try Referer header first.
+      const referer = req.headers['referer'] || req.headers['referrer'] || '';
+      if (referer) {
+        const refMatch = referer.match(/\/_midas\/[^?#]+\?(?:[^&]*&)*url=([^&\s#]+)/);
+        if (refMatch) {
+          try { targetOrigin = new URL(decodeURIComponent(refMatch[1])).origin; } catch (_) {}
+        }
+        // Also accept bare-origin referer (e.g. Referrer-Policy: origin) if no
+        // path match — in that case fall through to session lookup.
+      }
+
+      // 2. Fall back to session-based target origin.
+      if (!targetOrigin) {
+        const cookies = parseCookieHeader(req.headers.cookie);
+        const sid = cookies.midas_sid;
+        if (sid && SESSION_TARGETS.has(sid)) {
+          targetOrigin = SESSION_TARGETS.get(sid).origin;
+        }
+      }
+
+      if (targetOrigin) {
         try {
-          const targetOrigin = new URL(decodeURIComponent(refMatch[1])).origin;
-          const reqUrl = new URL(req.url, 'http://x');
-
-          // Allow Socket.IO polling/handshake to reach the real backend.
-          // Without this, sites using socket.io fallback to repeated polling failures.
-          if (reqUrl.pathname.startsWith('/socket.io/')) {
-            const targetUrl = targetOrigin + req.url;
-            setCors(res);
-            browseHandler(req, res, targetUrl);
-            return;
-          }
-
-          // Only proxy non-midas, non-sandbox paths
-          if (!reqUrl.pathname.startsWith('/_midas/') &&
-              reqUrl.pathname !== '/sandbox.js' &&
-              reqUrl.pathname !== '/demo.html') {
-            const targetUrl = targetOrigin + req.url;
-            setCors(res);
-            browseHandler(req, res, targetUrl);
-            return;
-          }
-        } catch (e) { /* fall through to 404 */ }
+          const targetUrl = targetOrigin + req.url;
+          setCors(res);
+          browseHandler(req, res, targetUrl);
+          return;
+        } catch (_) { /* fall through */ }
       }
     }
   }

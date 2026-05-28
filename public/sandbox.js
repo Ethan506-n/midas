@@ -598,6 +598,27 @@
     });
   } catch (e) {}
 
+  // ── document.URL / document.documentURI virtualiser ─────────────────────
+  // Some libraries (including socket.io 4.x) read document.URL or
+  // document.documentURI instead of location.href to determine the base
+  // origin. We override both to return BASE_URL (the target-site URL).
+  try {
+    var _docProto = Object.getPrototypeOf(document) || Document.prototype;
+    ['URL', 'documentURI'].forEach(function (prop) {
+      var _desc = Object.getOwnPropertyDescriptor(_docProto, prop) ||
+                  Object.getOwnPropertyDescriptor(Document.prototype, prop);
+      if (!_desc || !_desc.get) return;
+      var _realGet = _desc.get;
+      Object.defineProperty(_docProto, prop, {
+        get: function () {
+          if (BASE_URL) return BASE_URL;
+          return _realGet.call(this);
+        },
+        configurable: true,
+      });
+    });
+  } catch (e) {}
+
   // ── location property virtualiser ────────────────────────────────────────
   // When the proxy serves a page at /_midas/BROWSE?url=https://site.com/app/chat
   // the SPA reads location.pathname as '/_midas/BROWSE' and can't route.

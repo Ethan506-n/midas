@@ -3,7 +3,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { router } from './router.js';
+import { router, SESSION_TARGETS } from './router.js';
 import { wsUpgradeHandler } from './ws-bridge.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -54,7 +54,7 @@ const INDEX_HTML = `<!doctype html>
   <button id="go">Go</button>
   <span id="status"></span>
 </div>
-  <iframe id="frame" name="midas-frame" src="about:blank" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation allow-downloads allow-modals allow-orientation-lock allow-pointer-lock allow-presentation"></iframe>
+  <iframe id="frame" name="midas-frame" src="about:blank" referrerpolicy="strict-origin-when-cross-origin" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation allow-downloads allow-modals allow-orientation-lock allow-pointer-lock allow-presentation"></iframe>
 <script>
 (()=>{
   const ENGINES = {
@@ -327,17 +327,30 @@ if (USE_HTTP2) {
 }
 
 // Proxy native WebSocket upgrades (e.g. socket.io, Firebase RTDB, etc.)
-// MidasWebSocket in sandbox.js rewrites wss://target.com/... to
-// wss://proxy.dev/_midas/BROWSE?url=https://target.com/...  so the upgrade
-// request arrives here.  We relay it transparently to the real target.
+// Two cases:
+//   1. Properly rewritten: wss://proxy/_midas/BROWSE?url=wss://target.com/... 
+//   2. Bare path upgrade (socket.io WS transport on /socket.io/): use the
+//      session cookie to find the target origin and forward the upgrade there.
 server.on('upgrade', (req, socket, head) => {
   try {
     const reqUrl = new URL(req.url, 'http://x');
     if (reqUrl.pathname.startsWith('/_midas/') && reqUrl.searchParams.has('url')) {
       wsUpgradeHandler(req, socket, head);
-    } else {
-      socket.destroy();
+      return;
     }
+    // Session-based fallback for bare-path socket.io/WS upgrades.
+    const cookieStr = req.headers.cookie || '';
+    const sidMatch = cookieStr.match(/(?:^|;\s*)midas_sid=([^;]+)/);
+    const sid = sidMatch ? sidMatch[1] : null;
+    if (sid && SESSION_TARGETS.has(sid)) {
+      const { origin } = SESSION_TARGETS.get(sid);
+      // Rewrite the request URL to /_midas/BROWSE?url=<target origin + path>
+      const targetUrl = origin + req.url;
+      req.url = '/_midas/browse?url=' + encodeURIComponent(targetUrl);
+      wsUpgradeHandler(req, socket, head);
+      return;
+    }
+    socket.destroy();
   } catch (e) {
     try { socket.destroy(); } catch (_) {}
   }

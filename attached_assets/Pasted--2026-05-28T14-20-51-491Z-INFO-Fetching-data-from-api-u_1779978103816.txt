@@ -1,0 +1,408 @@
+[2026-05-28T14:20:51.491Z] [INFO] Fetching data from /api/user/data 
+VM103 93047183bc:26 [2026-05-28T14:20:52.236Z] [INFO] Response status for /api/user/data: 200
+VM101 93047183bc:1216  GET http://localhost:5000/socket.io/?EIO=4&transport=polling&t=kz362p3z 404 (Not Found)
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+(anonymous) @ VM101 93047183bc:4829
+setTimeout
+reconnect @ VM101 93047183bc:4823
+(anonymous) @ VM101 93047183bc:4833
+onError @ VM101 93047183bc:4608
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:2110
+Emitter.emit @ VM101 93047183bc:627
+onError @ VM101 93047183bc:819
+(anonymous) @ VM101 93047183bc:1131
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:1237
+(anonymous) @ VM101 93047183bc:1212
+setTimeout
+xhr.onreadystatechange @ VM101 93047183bc:1211
+XMLHttpRequest.send
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+(anonymous) @ VM101 93047183bc:4829
+setTimeout
+reconnect @ VM101 93047183bc:4823
+(anonymous) @ VM101 93047183bc:4833
+onError @ VM101 93047183bc:4608
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:2110
+Emitter.emit @ VM101 93047183bc:627
+onError @ VM101 93047183bc:819
+(anonymous) @ VM101 93047183bc:1131
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:1237
+(anonymous) @ VM101 93047183bc:1212
+setTimeout
+xhr.onreadystatechange @ VM101 93047183bc:1211
+XMLHttpRequest.send
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+(anonymous) @ VM101 93047183bc:4829
+setTimeout
+reconnect @ VM101 93047183bc:4823
+(anonymous) @ VM101 93047183bc:4833
+onError @ VM101 93047183bc:4608
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:2110
+Emitter.emit @ VM101 93047183bc:627
+onError @ VM101 93047183bc:819
+(anonymous) @ VM101 93047183bc:1131
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:1237
+(anonymous) @ VM101 93047183bc:1212
+setTimeout
+xhr.onreadystatechange @ VM101 93047183bc:1211
+XMLHttpRequest.send
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+(anonymous) @ VM101 93047183bc:4829
+setTimeout
+reconnect @ VM101 93047183bc:4823
+(anonymous) @ VM101 93047183bc:4833
+onError @ VM101 93047183bc:4608
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:2110
+Emitter.emit @ VM101 93047183bc:627
+onError @ VM101 93047183bc:819
+(anonymous) @ VM101 93047183bc:1131
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:1237
+(anonymous) @ VM101 93047183bc:1212
+setTimeout
+xhr.onreadystatechange @ VM101 93047183bc:1211
+XMLHttpRequest.send
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+(anonymous) @ VM101 93047183bc:4829
+setTimeout
+reconnect @ VM101 93047183bc:4823
+(anonymous) @ VM101 93047183bc:4833
+onError @ VM101 93047183bc:4608
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:2110
+Emitter.emit @ VM101 93047183bc:627
+onError @ VM101 93047183bc:819
+(anonymous) @ VM101 93047183bc:1131
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:1237
+(anonymous) @ VM101 93047183bc:1212
+setTimeout
+xhr.onreadystatechange @ VM101 93047183bc:1211
+XMLHttpRequest.send
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+(anonymous) @ VM101 93047183bc:4829
+setTimeout
+reconnect @ VM101 93047183bc:4823
+maybeReconnectOnOpen @ VM101 93047183bc:4577
+onError @ VM101 93047183bc:4611
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:2110
+Emitter.emit @ VM101 93047183bc:627
+onError @ VM101 93047183bc:819
+(anonymous) @ VM101 93047183bc:1131
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:1237
+(anonymous) @ VM101 93047183bc:1212
+setTimeout
+xhr.onreadystatechange @ VM101 93047183bc:1211
+XMLHttpRequest.send
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+Manager @ VM101 93047183bc:4523
+lookup @ VM101 93047183bc:4887
+(anonymous) @ VM102 93047183bc:2
+eclipse.png:1  GET http://localhost:5000/img/badge/eclipse.png 404 (Not Found)
+vip.png:1  GET http://localhost:5000/img/badge/vip.png 404 (Not Found)
+2VM103 93047183bc:226 Ignoring image loading error
+linked.png:1  GET http://localhost:5000/img/badge/linked.png 404 (Not Found)
+VM103 93047183bc:226 Ignoring image loading error
+verified.png:1  GET http://localhost:5000/img/badge/verified.png 404 (Not Found)
+VM103 93047183bc:226 Ignoring image loading error
+epic.png:1  GET http://localhost:5000/img/lootbox/epic.png 404 (Not Found)
+VM103 93047183bc:226 Ignoring image loading error
+VM101 93047183bc:1216  GET http://localhost:5000/socket.io/?EIO=4&transport=polling&t=kz75pvl6 404 (Not Found)
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+(anonymous) @ VM101 93047183bc:4829
+setTimeout
+reconnect @ VM101 93047183bc:4823
+(anonymous) @ VM101 93047183bc:4833
+onError @ VM101 93047183bc:4608
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:2110
+Emitter.emit @ VM101 93047183bc:627
+onError @ VM101 93047183bc:819
+(anonymous) @ VM101 93047183bc:1131
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:1237
+(anonymous) @ VM101 93047183bc:1212
+setTimeout
+xhr.onreadystatechange @ VM101 93047183bc:1211
+XMLHttpRequest.send
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+(anonymous) @ VM101 93047183bc:4829
+setTimeout
+reconnect @ VM101 93047183bc:4823
+(anonymous) @ VM101 93047183bc:4833
+onError @ VM101 93047183bc:4608
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:2110
+Emitter.emit @ VM101 93047183bc:627
+onError @ VM101 93047183bc:819
+(anonymous) @ VM101 93047183bc:1131
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:1237
+(anonymous) @ VM101 93047183bc:1212
+setTimeout
+xhr.onreadystatechange @ VM101 93047183bc:1211
+XMLHttpRequest.send
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+(anonymous) @ VM101 93047183bc:4829
+setTimeout
+reconnect @ VM101 93047183bc:4823
+(anonymous) @ VM101 93047183bc:4833
+onError @ VM101 93047183bc:4608
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:2110
+Emitter.emit @ VM101 93047183bc:627
+onError @ VM101 93047183bc:819
+(anonymous) @ VM101 93047183bc:1131
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:1237
+(anonymous) @ VM101 93047183bc:1212
+setTimeout
+xhr.onreadystatechange @ VM101 93047183bc:1211
+XMLHttpRequest.send
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+(anonymous) @ VM101 93047183bc:4829
+setTimeout
+reconnect @ VM101 93047183bc:4823
+(anonymous) @ VM101 93047183bc:4833
+onError @ VM101 93047183bc:4608
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:2110
+Emitter.emit @ VM101 93047183bc:627
+onError @ VM101 93047183bc:819
+(anonymous) @ VM101 93047183bc:1131
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:1237
+(anonymous) @ VM101 93047183bc:1212
+setTimeout
+xhr.onreadystatechange @ VM101 93047183bc:1211
+XMLHttpRequest.send
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+(anonymous) @ VM101 93047183bc:4829
+setTimeout
+reconnect @ VM101 93047183bc:4823
+(anonymous) @ VM101 93047183bc:4833
+onError @ VM101 93047183bc:4608
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:2110
+Emitter.emit @ VM101 93047183bc:627
+onError @ VM101 93047183bc:819
+(anonymous) @ VM101 93047183bc:1131
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:1237
+(anonymous) @ VM101 93047183bc:1212
+setTimeout
+xhr.onreadystatechange @ VM101 93047183bc:1211
+XMLHttpRequest.send
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+(anonymous) @ VM101 93047183bc:4829
+setTimeout
+reconnect @ VM101 93047183bc:4823
+(anonymous) @ VM101 93047183bc:4833
+onError @ VM101 93047183bc:4608
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:2110
+Emitter.emit @ VM101 93047183bc:627
+onError @ VM101 93047183bc:819
+(anonymous) @ VM101 93047183bc:1131
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:1237
+(anonymous) @ VM101 93047183bc:1212
+setTimeout
+xhr.onreadystatechange @ VM101 93047183bc:1211
+XMLHttpRequest.send
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+(anonymous) @ VM101 93047183bc:4829
+setTimeout
+reconnect @ VM101 93047183bc:4823
+maybeReconnectOnOpen @ VM101 93047183bc:4577
+onError @ VM101 93047183bc:4611
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:2110
+Emitter.emit @ VM101 93047183bc:627
+onError @ VM101 93047183bc:819
+(anonymous) @ VM101 93047183bc:1131
+Emitter.emit @ VM101 93047183bc:627
+_onError @ VM101 93047183bc:1237
+(anonymous) @ VM101 93047183bc:1212
+setTimeout
+xhr.onreadystatechange @ VM101 93047183bc:1211
+XMLHttpRequest.send
+_create @ VM101 93047183bc:1216
+Request @ VM101 93047183bc:1153
+request @ VM101 93047183bc:1335
+doPoll @ VM101 93047183bc:1128
+_poll @ VM101 93047183bc:971
+doOpen @ VM101 93047183bc:931
+open @ VM101 93047183bc:827
+_open @ VM101 93047183bc:1828
+SocketWithoutUpgrade @ VM101 93047183bc:1782
+SocketWithUpgrade @ VM101 93047183bc:2180
+Socket @ VM101 93047183bc:2341
+open @ VM101 93047183bc:4592
+Manager @ VM101 93047183bc:4523
+lookup @ VM101 93047183bc:4887
+(anonymous) @ VM102 93047183bc:2
+VM98 93047183bc:221  GET http://localhost:5000/app/chat 404 (Not Found)

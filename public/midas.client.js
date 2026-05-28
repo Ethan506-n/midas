@@ -537,6 +537,16 @@ class MidasWebSocket extends EventTarget {
     }
 }
 function installWebSocketHook() {
+    // If sandbox.js already installed a native WebSocket proxy (marked with
+    // _midasNative = true), skip the HTTP-bridge hook entirely.  The native
+    // hook routes WebSocket connections through real WS upgrades, which is
+    // required for socket.io and other real-time protocols that rely on true
+    // bidirectional streaming.  Replacing it with an HTTP-polling bridge
+    // causes missed messages and repeated disconnects.
+    if (window.WebSocket && window.WebSocket._midasNative) {
+        createHiddenProperty(window, '__midas_ws_real', REAL_WEBSOCKET);
+        return;
+    }
     // Replace global WebSocket with our bridge
     const descriptor = Object.getOwnPropertyDescriptor(window, 'WebSocket');
     if (descriptor && descriptor.configurable) {

@@ -751,6 +751,9 @@
   MidasWebSocket.OPEN = _OrigWebSocket.OPEN;
   MidasWebSocket.CLOSING = _OrigWebSocket.CLOSING;
   MidasWebSocket.CLOSED = _OrigWebSocket.CLOSED;
+  // Mark so midas.client.js knows the native WS hook is already installed
+  // and skips replacing it with the HTTP-bridge version.
+  MidasWebSocket._midasNative = true;
   try {
     window.WebSocket = MidasWebSocket;
   } catch (e) {}

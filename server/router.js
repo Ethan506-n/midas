@@ -1324,7 +1324,7 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
   }
 }
 
-export { SESSION_TARGETS };
+export { SESSION_TARGETS, COOKIE_JAR, parseCookieHeader, jarFor, buildCookieHeader };
 
 export function router(req, res, url) {
   setCors(res);

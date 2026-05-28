@@ -162,6 +162,18 @@
 
   // ── helpers ──────────────────────────────────────────────────────────────
 
+  // Paths that the proxy server itself owns — never forward these to the target site.
+  var _PROXY_OWN_RE = /^\/(sandbox\.js|loader\.js|sw\.js|demo\.html|manifest\.json|favicon[^/]*|_midas\b)/;
+
+  // Returns true when a same-proxy-origin path should actually be forwarded to
+  // the target site. This happens when a library (e.g. socket.io, engine.io)
+  // captures window.location.origin before our virtualiser runs and then
+  // constructs absolute XHR/fetch URLs against the proxy server's origin instead
+  // of the target site's origin.
+  function _isMisroutedTargetPath(pathname) {
+    return BASE_URL && !_PROXY_OWN_RE.test(pathname);
+  }
+
   function toProxy(url) {
     if (!url) return url;
     // Handle TrustedScriptURL and other non-string URL-like objects (Trusted Types API)
@@ -179,11 +191,21 @@
     try {
       var base = BASE_URL || location.href;
       var abs = new URL(url, base).href;
-      // Don't proxy same-origin /_midas/ paths
       var parsed = new URL(abs);
+      // Don't proxy /_midas/ paths — those are already proxy paths.
       if (parsed.origin === _REAL_ORIGIN && parsed.pathname.indexOf('/_midas/') === 0) return url;
-      // Don't proxy same-origin non-proxy paths (static assets served by the proxy server itself)
-      if (parsed.origin === _REAL_ORIGIN && parsed.pathname.indexOf('/_midas/') === -1) return url;
+      // If the URL targets the proxy server's origin on a non-proxy path (e.g.
+      // /socket.io/, /api/, /graphql — meaning a library cached the real origin
+      // before our virtualiser ran), rewrite it to use the target site's origin.
+      if (parsed.origin === _REAL_ORIGIN && _isMisroutedTargetPath(parsed.pathname)) {
+        try {
+          var targetOrigin = new URL(BASE_URL).origin;
+          abs = targetOrigin + parsed.pathname + parsed.search + parsed.hash;
+        } catch (e2) { return url; }
+      } else if (parsed.origin === _REAL_ORIGIN) {
+        // Proxy-server–owned path — let it pass through unchanged.
+        return url;
+      }
       return PROXY_BASE + '?url=' + encodeURIComponent(abs);
     } catch (e) { return url; }
   }
@@ -199,13 +221,16 @@
     if (url.indexOf('blob:') === 0) return false;
     if (url.indexOf('javascript:') === 0) return false;
     if (url === 'about:blank' || url === '') return false;
-    // Proxy absolute external URLs and relative URLs that resolve to external
     try {
       var base = BASE_URL || location.href;
       var abs = new URL(url, base).href;
       var parsed = new URL(abs);
-      // If same-origin as the proxy server, let it pass through
-      if (parsed.origin === _REAL_ORIGIN) return false;
+      if (parsed.origin === _REAL_ORIGIN) {
+        // Same-origin as proxy server. Only proxy it if it looks like a
+        // misrouted target-site request (e.g. socket.io polling that cached
+        // the real window.location.origin before our virtualiser ran).
+        return _isMisroutedTargetPath(parsed.pathname);
+      }
       return true;
     } catch (e) { return false; }
   }

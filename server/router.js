@@ -373,12 +373,17 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
     const stealthScript = getStealthScript(baseUrl);
     const injectionScript = antiDetectionScript + stealthScript;
     
-    if (html.includes('</head>')) {
+    // Inject as the FIRST thing inside <head> so our hooks run before any
+    // other scripts (including socket.io, Firebase, etc.) can read and cache
+    // real location.origin / location.hostname values.
+    if (/<head\b[^>]*>/i.test(html)) {
+      html = html.replace(/<head(\b[^>]*)>/i, (m) => m + injectionScript);
+    } else if (html.includes('</head>')) {
       html = html.replace('</head>', injectionScript + '</head>');
     } else if (html.includes('</body>')) {
       html = html.replace('</body>', injectionScript + '</body>');
     } else {
-      html += injectionScript;
+      html = injectionScript + html;
     }
   }
 

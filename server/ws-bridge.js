@@ -6,7 +6,7 @@
 import http from 'http';
 import https from 'https';
 import { URL } from 'url';
-import WebSocket from 'ws';
+import WebSocket, { WebSocketServer } from 'ws';
 import { parseCookieHeader, jarFor, buildCookieHeader } from './router.js';
 
 const BRIDGE_SESSIONS = new Map();
@@ -148,7 +148,7 @@ export function wsUpgradeHandler(req, socket, head) {
     }
 
     // Complete the handshake with the browser first.
-    const wss = new WebSocket.Server({ noServer: true });
+    const wss = new WebSocketServer({ noServer: true });
     wss.handleUpgrade(req, socket, head, (clientWs) => {
       // --- Message buffer: captures client messages that arrive before the
       //     target connection is open (e.g. socket.io "2probe" upgrade probe).

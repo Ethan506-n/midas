@@ -1043,7 +1043,26 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
     delete outHeaders['content-security-policy-report-only'];
     delete outHeaders['strict-transport-security'];
     delete outHeaders['x-frame-options'];
-    delete outHeaders['set-cookie'];
+    // Forward non-HttpOnly cookies to the browser (rewritten for the proxy
+    // domain so JS can read them via document.cookie).  HttpOnly cookies stay
+    // server-side only (already stored in jar above).
+    {
+      const rawSc = proxyRes.headers['set-cookie'];
+      const scList = rawSc ? (Array.isArray(rawSc) ? rawSc : [rawSc]) : [];
+      const visible = scList
+        .map(sc => {
+          const p = parseSetCookie(sc);
+          if (!p || p.httpOnly) return null;
+          // Strip domain/secure so the cookie lands on the proxy origin.
+          return p.name + '=' + p.value + '; SameSite=Lax; Path=/';
+        })
+        .filter(Boolean);
+      if (visible.length > 0) {
+        outHeaders['set-cookie'] = visible;
+      } else {
+        delete outHeaders['set-cookie'];
+      }
+    }
     // Remove policies that interfere with cross-origin proxy delivery
     delete outHeaders['cross-origin-opener-policy'];
     delete outHeaders['cross-origin-embedder-policy'];
@@ -1235,6 +1254,43 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
         if (actuallyHtml) {
           out = rewriteHtml(text, url.toString(), baseProxyUrl);
           outHeaders['content-type'] = 'text/html; charset=utf-8';
+
+          // ── Cookie injection ──────────────────────────────────────────────
+          // The proxy strips all Set-Cookie headers so the browser never stores
+          // server-set cookies (e.g. `token`).  Proxied JS that reads
+          // document.cookie (e.g. socket.js: document.cookie.split('token='))
+          // gets undefined, causing auth failures on socket connect.
+          //
+          // Fix: collect every non-HttpOnly cookie in the server-side jar for
+          // this host and inject a tiny <script> right after sandbox.js that
+          // assigns each one via `document.cookie = ...`.  sandbox.js's virtual
+          // cookie setter stores them in sessionStorage so they are visible to
+          // subsequent document.cookie reads.
+          try {
+            const now = Date.now();
+            const cookieLines = [];
+            for (const [host, list] of jar) {
+              if (!hostMatches(host, url.hostname)) continue;
+              for (const c of list) {
+                if (c.httpOnly) continue;
+                if (c.expires && c.expires < now) continue;
+                cookieLines.push(
+                  `try{document.cookie=${JSON.stringify(c.name + '=' + c.value + '; SameSite=Lax; Path=/')};}catch(_e){}`
+                );
+              }
+            }
+            if (cookieLines.length > 0) {
+              const cookieScript = '<script>' + cookieLines.join('') + '</script>';
+              // Inject immediately after the sandbox.js tag so the virtual
+              // cookie setter (installed by sandbox.js) is already active.
+              const sbRe = /(<script[^>]+sandbox\.js[^>]*><\/script>)/i;
+              if (sbRe.test(out)) {
+                out = out.replace(sbRe, '$1' + cookieScript);
+              } else {
+                out = out.replace(/<\/head>/i, cookieScript + '</head>');
+              }
+            }
+          } catch (_ce) { /* never break HTML rendering */ }
         } else if (shouldRewriteCss) {
           out = rewriteCss(text, url.toString());
           outHeaders['content-type'] = 'text/css; charset=utf-8';

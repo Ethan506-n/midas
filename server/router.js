@@ -88,6 +88,24 @@ function isSDKUrl(url) {
   } catch { return false; }
 }
 
+// XML/RDF namespace URIs (e.g. http://www.w3.org/1999/xhtml, http://www.w3.org/2000/svg)
+// are identifier strings used by libraries like DOMPurify for element validation.
+// They are NOT browsable URLs and must NEVER be proxy-rewritten — doing so corrupts
+// the library's allow-list and causes it to sanitize all content to an empty string.
+function isXmlNamespaceUrl(url) {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return /^(www\.)?w3\.org$/.test(h) ||
+           /^(www\.)?purl\.org$/.test(h) ||
+           /^(www\.)?schema\.org$/.test(h) ||
+           /^(www\.)?xmlns\.com$/.test(h) ||
+           /^ns\.(adobe|microsoft)\.com$/.test(h) ||
+           /^vocab\.org$/.test(h) ||
+           /^ogp\.me$/.test(h) ||
+           /^open\.vocab\.org$/.test(h);
+  } catch { return false; }
+}
+
 function extractOriginalFromProxy(u) {
   try {
     const parsed = new URL(u, 'http://x');
@@ -404,17 +422,17 @@ function rewriteJs(js, baseUrl) {
   // Use (?<!\\) lookbehind to avoid matching JSON-escaped \"url\" sequences (prevents %5C corruption)
   // Use [^"\\\s] to also exclude backslash from URL content
   js = js.replace(/(?<!\\)"(https?:\/\/[^"\\\s]{3,})(?<!\\)"/g, (m, u) => {
-    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u)) return m;
+    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u) || isXmlNamespaceUrl(u)) return m;
     return '"' + toProxyUrl(u) + '"';
   });
   // Absolute URL strings in single quotes
   js = js.replace(/(?<!\\)'(https?:\/\/[^'\\\s]{3,})(?<!\\)'/g, (m, u) => {
-    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u)) return m;
+    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u) || isXmlNamespaceUrl(u)) return m;
     return "'" + toProxyUrl(u) + "'";
   });
   // Absolute URL template literals (simple, no expressions)
   js = js.replace(/`(https?:\/\/[^`$\\\s]{3,})`/g, (m, u) => {
-    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u)) return m;
+    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u) || isXmlNamespaceUrl(u)) return m;
     return '`' + toProxyUrl(u) + '`';
   });
 

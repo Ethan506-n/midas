@@ -31,22 +31,17 @@ export function isFilterDomain(hostname) {
 }
 
 /**
- * Bypass headers to try to evade common content filters
+ * Bypass headers to try to evade common content filters (school/work networks).
+ * Uses a normal browser UA — Googlebot was removed because Cloudflare cross-checks
+ * bot UAs against the originating ASN and blocks harder on mismatches.
  */
 export function getBypassHeaders() {
   return {
-    // Claim to be a bot/crawler (some filters allow bots)
-    'user-agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-    
-    // Add headers that suggest legitimate traffic
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'accept-language': 'en-US,en;q=0.9',
     'accept-encoding': 'gzip, deflate, br',
     'cache-control': 'no-cache',
-    
-    // Some filters check referrer origin
     'referer': 'https://google.com',
-    
-    // Bypass DNS filter detection
     'dnt': '1',
     'sec-fetch-site': 'none',
     'sec-fetch-mode': 'navigate',

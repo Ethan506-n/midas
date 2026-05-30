@@ -45,19 +45,74 @@ export function generateProxyHeaders() {
 }
 
 /**
- * Detect Cloudflare challenge pages
+ * Detect Cloudflare Error 1000 ("DNS points to prohibited IP") pages specifically.
+ * This is NOT a solvable JS challenge — it means Cloudflare's edge is rejecting the
+ * datacenter IP.  We need a different retry strategy (clean headers, no proxy artifacts)
+ * rather than the normal challenge retry which adds proxy-announcing headers and
+ * makes things worse.
  */
-export function isCloudflareChallenge(html) {
+export function isCloudflareError1000(html) {
   if (!html || typeof html !== 'string') return false;
   const lower = html.toLowerCase();
   return (
-    lower.includes('challenge') ||
-    lower.includes('checking your browser') ||
-    lower.includes('cloudflare') ||
-    lower.includes('ray id') ||
-    lower.includes('cf_clearance') ||
-    lower.includes('chk_jschl')
+    (lower.includes('error 1000') || lower.includes('error&nbsp;1000')) ||
+    lower.includes('dns points to prohibited ip') ||
+    (lower.includes('prohibited ip') && lower.includes('cloudflare')) ||
+    (lower.includes('1000') && lower.includes('dns') && lower.includes('cloudflare'))
   );
+}
+
+/**
+ * Detect Cloudflare challenge pages (IUAM / JS challenge / Turnstile).
+ * Deliberately excludes Error 1000 — that is handled separately.
+ */
+export function isCloudflareChallenge(html) {
+  if (!html || typeof html !== 'string') return false;
+  // Don't treat Error 1000 as a retryable challenge
+  if (isCloudflareError1000(html)) return false;
+  const lower = html.toLowerCase();
+  return (
+    lower.includes('checking your browser') ||
+    lower.includes('cf_clearance') ||
+    lower.includes('chk_jschl') ||
+    lower.includes('challenge-platform') ||
+    (lower.includes('just a moment') && lower.includes('cloudflare')) ||
+    (lower.includes('turnstile') && lower.includes('cloudflare'))
+  );
+}
+
+/**
+ * All header names that identify a request as coming from a proxy or
+ * datacenter.  Cloudflare's bot management scores these heavily —
+ * sending them actively worsens the block.  Strip them before every
+ * outgoing upstream request.
+ */
+const PROXY_HEADER_NAMES = new Set([
+  'x-forwarded-for',
+  'x-forwarded-proto',
+  'x-forwarded-host',
+  'x-forwarded-by',
+  'x-forwarded-server',
+  'x-forwarded-for-original',
+  'x-real-ip',
+  'x-originating-ip',
+  'x-client-ip',
+  'client-ip',
+  'cf-connecting-ip',
+  'via',
+  'forwarded',
+  'x-cluster-client-ip',
+  'proxy-connection',
+  'x-proxy-id',
+  'x-bluemix-client-ip',
+]);
+
+export function stripProxyHeaders(headers) {
+  const out = { ...headers };
+  for (const k of Object.keys(out)) {
+    if (PROXY_HEADER_NAMES.has(k.toLowerCase())) delete out[k];
+  }
+  return out;
 }
 
 /**
@@ -157,41 +212,18 @@ export function getCloudflareBypassHeaders() {
 }
 
 /**
- * Generate enhanced headers with site-specific variations
+ * Generate enhanced headers with site-specific variations.
+ * Proxy-identifying headers (x-forwarded-for, via, cf-connecting-ip, etc.) are
+ * intentionally never added here — Cloudflare's bot management scores them heavily
+ * and adding them on retries made things worse, not better.
  */
 export function getEnhancedHeadersForSite(hostname, depth = 0) {
   const profile = getRandomBrowserProfile();
   const headers = {
     'user-agent': profile.ua,
     ...getCloudflareBypassHeaders(),
+    'cache-control': 'max-age=0',
   };
-
-  // Only add aggressive proxy headers on retries (depth > 0)
-  if (depth > 0) {
-    const proxyHeaders = generateProxyHeaders();
-    if (depth === 1) {
-      headers['x-forwarded-for'] = proxyHeaders['x-forwarded-for'];
-      headers['x-real-ip'] = proxyHeaders['x-real-ip'];
-      headers['via'] = proxyHeaders['via'];
-    } else if (depth === 2) {
-      headers['x-forwarded-for'] = proxyHeaders['x-forwarded-for'];
-      headers['x-forwarded-proto'] = proxyHeaders['x-forwarded-proto'];
-      headers['x-real-ip'] = proxyHeaders['x-real-ip'];
-      headers['cf-connecting-ip'] = proxyHeaders['cf-connecting-ip'];
-      headers['via'] = proxyHeaders['via'];
-    } else {
-      Object.assign(headers, proxyHeaders);
-    }
-    
-    headers['cache-control'] = depth > 2 ? 'no-cache' : 'max-age=0';
-    if (depth > 2) {
-      headers['pragma'] = 'no-cache';
-      headers['expires'] = '0';
-    }
-  } else {
-    headers['cache-control'] = 'max-age=0';
-  }
-
   return headers;
 }
 

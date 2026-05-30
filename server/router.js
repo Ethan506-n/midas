@@ -12,7 +12,7 @@ import { getDomainConfig, shouldPreserveAuth, handlesJsonApi, getRateLimit } fro
 import { globalRetry } from './error-recovery.js';
 import { resolveWithFallback, isCloudflareIp } from './dns-resolver.js';
 import { isFilterDomain, getBypassHeaders, isFilterBlockPage } from './filter-bypass.js';
-import { getEnhancedAntiDetectionHeaders, isCloudflareChallenge, getCloudflareBypassHeaders, addBrowserDelay, addAdaptiveDelay, isBotDetectionPage, isLikelyBotBlock } from './advanced-evasion.js';
+import { getEnhancedAntiDetectionHeaders, isCloudflareChallenge, isCloudflareError1000, getCloudflareBypassHeaders, addBrowserDelay, addAdaptiveDelay, isBotDetectionPage, isLikelyBotBlock, stripProxyHeaders } from './advanced-evasion.js';
 import { getSiteConfig, getMaxRetries, getSiteSpecificHeaders } from './site-configs.js';
 import { shouldRetryRequest, getRetryDelayMs, analyzeErrorResponse } from './error-strategies.js';
 import { renderPageWithJS, handleJSChallenge, isAvailable as isBrowserAvailable, closeBrowser } from './browser-automation.js';
@@ -859,6 +859,20 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
   // Override with host (required)
   headers['host'] = url.host;
 
+  // Strip all proxy-identifying headers before sending upstream.
+  // These headers (x-forwarded-for, via, cf-connecting-ip, etc.) announce that the
+  // request is coming from a proxy/datacenter and are the primary signal Cloudflare's
+  // bot management uses to score and block requests.  They must never reach the target.
+  Object.assign(headers, stripProxyHeaders(headers));
+  for (const k of Object.keys(headers)) {
+    const lk = k.toLowerCase();
+    if (lk.startsWith('x-forwarded') || lk === 'via' || lk === 'forwarded' ||
+        lk === 'x-real-ip' || lk === 'cf-connecting-ip' || lk === 'client-ip' ||
+        lk === 'x-originating-ip' || lk === 'x-client-ip' || lk === 'proxy-connection') {
+      delete headers[k];
+    }
+  }
+
   // Determine sec-fetch-* based on accept header (heuristic)
   const isDocumentReq = (req.headers['accept'] || '').includes('text/html') || (req.headers['sec-fetch-dest'] === 'document');
   const isXhrOrFetch = req.headers['x-requested-with'] === 'XMLHttpRequest' || req.headers['sec-fetch-mode'] === 'cors' || req.headers['sec-fetch-mode'] === 'same-origin';
@@ -1189,6 +1203,26 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
 
         // Check for Cloudflare challenges with site-specific retry limits
         const maxRetries = getMaxRetries(url.hostname);
+
+        // Error 1000 ("DNS points to prohibited IP") is a hard block from Cloudflare's
+        // edge because the server IP is flagged as a datacenter.  It is NOT a JS challenge
+        // and cannot be solved by adding headers — but retrying with the cleanest possible
+        // browser headers (no proxy artifacts, fresh UA) gives the best chance of a
+        // different edge node or path accepting the request.
+        if (isHtml && isCloudflareError1000(text)) {
+          if (depth < 2) {
+            console.log(`[CF] Error 1000 on ${url.hostname} (attempt ${depth + 1}/2) — retrying with clean browser headers`);
+            browseHandler(req, res, targetUrl, depth + 1);
+          } else {
+            console.log(`[CF] Error 1000 on ${url.hostname} — all retries exhausted, passing through error page`);
+            outHeaders['content-type'] = 'text/html; charset=utf-8';
+            delete outHeaders['content-length'];
+            res.writeHead(proxyRes.statusCode, outHeaders);
+            res.end(rewriteHtml(text, url.toString(), baseProxyUrl));
+          }
+          return;
+        }
+
         if (isHtml && isCloudflareChallenge(text) && depth < maxRetries) {
           if (isProblematicSite) {
             console.log(`[CF] Detected Cloudflare challenge, retrying (${depth}/${maxRetries}) with bypass headers...`);

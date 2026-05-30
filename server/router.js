@@ -13,6 +13,7 @@ import { globalRetry } from './error-recovery.js';
 import { resolveWithFallback, isCloudflareIp } from './dns-resolver.js';
 import { isFilterDomain, getBypassHeaders, isFilterBlockPage } from './filter-bypass.js';
 import { getEnhancedAntiDetectionHeaders, isCloudflareChallenge, isCloudflareError1000, getCloudflareBypassHeaders, addBrowserDelay, addAdaptiveDelay, isBotDetectionPage, isLikelyBotBlock, stripProxyHeaders } from './advanced-evasion.js';
+import { detectChallengeType, hasCFClearance, extractCFRayId, attemptIUAMSolve } from './cloudflare-challenge.js';
 import { getSiteConfig, getMaxRetries, getSiteSpecificHeaders } from './site-configs.js';
 import { shouldRetryRequest, getRetryDelayMs, analyzeErrorResponse } from './error-strategies.js';
 import { renderPageWithJS, handleJSChallenge, isAvailable as isBrowserAvailable, closeBrowser } from './browser-automation.js';
@@ -1223,12 +1224,37 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
           return;
         }
 
-        if (isHtml && isCloudflareChallenge(text) && depth < maxRetries) {
-          if (isProblematicSite) {
-            console.log(`[CF] Detected Cloudflare challenge, retrying (${depth}/${maxRetries}) with bypass headers...`);
+        if (isHtml && isCloudflareChallenge(text)) {
+          const challengeType = detectChallengeType(text);
+          const rayId = extractCFRayId(text) || 'unknown';
+          console.log(`[CF] ${challengeType} challenge on ${url.hostname} (ray:${rayId})`);
+
+          // --- Old IUAM math challenge: solve server-side ---
+          if (challengeType === 'iuam' && depth === 0) {
+            const solved = await attemptIUAMSolve(text, url.toString());
+            if (solved.success) {
+              storeCookies(jar, url.hostname, solved.setCookieHeaders);
+              console.log(`[CF-IUAM] Solved, retrying ${url.hostname} with cf_clearance`);
+              browseHandler(req, res, targetUrl, depth + 1);
+            } else {
+              console.log(`[CF-IUAM] Server-side solve failed: ${solved.reason} — serving challenge to user`);
+              outHeaders['content-type'] = 'text/html; charset=utf-8';
+              delete outHeaders['content-length'];
+              res.writeHead(proxyRes.statusCode || 403, outHeaders);
+              res.end(rewriteHtml(text, url.toString(), baseProxyUrl));
+            }
+            return;
           }
-          // Retry with Cloudflare bypass headers
-          browseHandler(req, res, targetUrl, depth + 1);
+
+          // --- Turnstile / Managed challenge: serve to user ---
+          // The challenge widget runs in the user's browser.  All API calls to
+          // challenges.cloudflare.com go through sandbox.js → our proxy, so the
+          // resulting Set-Cookie: cf_clearance is captured by storeCookies() and
+          // stored in the session jar.  The user's next navigation will succeed.
+          outHeaders['content-type'] = 'text/html; charset=utf-8';
+          delete outHeaders['content-length'];
+          res.writeHead(proxyRes.statusCode || 403, outHeaders);
+          res.end(rewriteHtml(text, url.toString(), baseProxyUrl));
           return;
         }
 

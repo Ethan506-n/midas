@@ -36,14 +36,19 @@ export function isFilterDomain(hostname) {
  * bot UAs against the originating ASN and blocks harder on mismatches.
  */
 export function getBypassHeaders() {
+  const CV = '136';
   return {
-    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'user-agent': `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CV}.0.0.0 Safari/537.36`,
+    'sec-ch-ua': `"Google Chrome";v="${CV}", "Chromium";v="${CV}", "Not/A)Brand";v="99"`,
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
     'accept-language': 'en-US,en;q=0.9',
-    'accept-encoding': 'gzip, deflate, br',
+    'accept-encoding': 'gzip, deflate, br, zstd',
     'cache-control': 'no-cache',
     'referer': 'https://google.com',
     'dnt': '1',
-    'sec-fetch-site': 'none',
+    'sec-gpc': '1',
+    'sec-fetch-site': 'cross-site',
     'sec-fetch-mode': 'navigate',
     'sec-fetch-dest': 'document',
     'sec-fetch-user': '?1',

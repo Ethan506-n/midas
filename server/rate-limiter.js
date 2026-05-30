@@ -1,160 +1,128 @@
 /**
  * Rate Limiter & Connection Pool Manager
- * Prevents proxy from getting rate-limited/blocked by origin servers
- * Implements token bucket rate limiting + connection pooling
+ * Prevents proxy from getting rate-limited/blocked by origin servers.
+ * Token bucket per domain + per-domain HTTPS/HTTP connection pools.
  */
 
 import http from 'http';
 import https from 'https';
 
-// Per-domain rate limiters (token bucket)
 const domainLimiters = new Map();
+const domainPools    = new Map();
 
-// Per-domain connection pools
-const domainPools = new Map();
-
-// Global tracking
 const stats = {
-  requestsProcessed: 0,
+  requestsProcessed:   0,
   requestsRateLimited: 0,
-  connectionErrors: 0,
+  connectionErrors:    0,
 };
 
 /**
  * Token Bucket Rate Limiter
- * - Allows bursts but enforces average rate
- * - Default: 20 requests/second per domain
+ * Default: 30 req/s with a burst of 80 — tuned for a single-user proxy
+ * where bursts (page with 40 sub-resources) are normal.
  */
 class TokenBucket {
-  constructor(rps = 20, burstSize = 50) {
-    this.rps = rps; // requests per second
+  constructor(rps = 30, burstSize = 80) {
+    this.rps       = rps;
     this.burstSize = burstSize;
-    this.tokens = burstSize;
+    this.tokens    = burstSize;
     this.lastRefill = Date.now();
   }
 
-  // Add tokens based on time elapsed
   refill() {
-    const now = Date.now();
+    const now     = Date.now();
     const elapsed = (now - this.lastRefill) / 1000;
-    this.tokens = Math.min(this.burstSize, this.tokens + elapsed * this.rps);
+    this.tokens   = Math.min(this.burstSize, this.tokens + elapsed * this.rps);
     this.lastRefill = now;
   }
 
-  // Acquire token, return wait time in ms
-  acquire(count = 1) {
+  // Returns ms to wait (0 = proceed immediately)
+  acquire() {
     this.refill();
-    if (this.tokens >= count) {
-      this.tokens -= count;
+    if (this.tokens >= 1) {
+      this.tokens -= 1;
       return 0;
     }
-    const needed = count - this.tokens;
-    const waitTime = (needed / this.rps) * 1000;
+    const waitMs = ((1 - this.tokens) / this.rps) * 1000;
     this.tokens = 0;
-    return Math.ceil(waitTime);
+    return Math.ceil(waitMs);
   }
 }
 
 /**
- * Connection Pool Manager
- * - Keeps HTTP/HTTPS connections alive
- * - Limits concurrent connections per domain
+ * Per-domain HTTPS/HTTP agent pool.
+ * Larger socket counts avoid head-of-line blocking on pages with many assets.
  */
 class ConnectionPool {
-  constructor(maxPerDomain = 8) {
-    this.maxPerDomain = maxPerDomain;
-    this.agents = {
-      http: new http.Agent({
-        keepAlive: true,
-        maxSockets: maxPerDomain,
-        maxFreeSockets: 4,
-        timeout: 60000,
-      }),
-      https: new https.Agent({
-        keepAlive: true,
-        maxSockets: maxPerDomain,
-        maxFreeSockets: 4,
-        timeout: 60000,
-        rejectUnauthorized: false,
-      }),
-    };
+  constructor() {
+    this.http = new http.Agent({
+      keepAlive:        true,
+      maxSockets:       24,
+      maxFreeSockets:   8,
+      timeout:          30000,
+      freeSocketTimeout: 15000,
+      scheduling:       'lifo',   // Reuse hot sockets first
+    });
+    this.https = new https.Agent({
+      keepAlive:        true,
+      maxSockets:       24,
+      maxFreeSockets:   8,
+      timeout:          30000,
+      freeSocketTimeout: 15000,
+      scheduling:       'lifo',
+      rejectUnauthorized: false,
+    });
   }
 
   getAgent(isHttps) {
-    return isHttps ? this.agents.https : this.agents.http;
+    return isHttps ? this.https : this.http;
   }
 }
 
-// Get or create rate limiter for domain
 export function getRateLimiter(domain) {
-  if (!domainLimiters.has(domain)) {
-    domainLimiters.set(domain, new TokenBucket());
-  }
+  if (!domainLimiters.has(domain)) domainLimiters.set(domain, new TokenBucket());
   return domainLimiters.get(domain);
 }
 
-// Get or create connection pool for domain
 export function getConnectionPool(domain) {
-  if (!domainPools.has(domain)) {
-    domainPools.set(domain, new ConnectionPool());
-  }
+  if (!domainPools.has(domain)) domainPools.set(domain, new ConnectionPool());
   return domainPools.get(domain);
 }
 
-// Check if should rate limit
 export async function checkRateLimit(domain) {
-  const limiter = getRateLimiter(domain);
-  const waitTime = limiter.acquire(1);
-  
+  const limiter  = getRateLimiter(domain);
+  const waitTime = limiter.acquire();
   if (waitTime > 0) {
     stats.requestsRateLimited++;
-    // Wait before allowing request
     await new Promise(r => setTimeout(r, waitTime));
   }
-  
   stats.requestsProcessed++;
   return waitTime;
 }
 
-// Get agent for domain
 export function getAgent(domain, isHttps) {
-  const pool = getConnectionPool(domain);
-  return pool.getAgent(isHttps);
+  return getConnectionPool(domain).getAgent(isHttps);
 }
 
-// Track connection error (increases rate limit)
+// Back off on repeated errors (halve rate, pause briefly)
 export function trackConnectionError(domain) {
   stats.connectionErrors++;
   const limiter = getRateLimiter(domain);
-  
-  // Reduce rate on errors (half previous rate)
-  limiter.rps = Math.max(1, limiter.rps / 2);
+  limiter.rps       = Math.max(2, limiter.rps / 2);
   limiter.burstSize = Math.max(5, limiter.burstSize / 2);
-  
-  // Exponential backoff
   limiter.lastRefill = Date.now() + 1000;
 }
 
-// Get stats
 export function getStats() {
   const limiters = {};
-  for (const [domain, limiter] of domainLimiters) {
-    limiters[domain] = {
-      rps: limiter.rps,
-      currentTokens: Math.round(limiter.tokens * 100) / 100,
-      burstSize: limiter.burstSize,
-    };
+  for (const [domain, l] of domainLimiters) {
+    limiters[domain] = { rps: l.rps, tokens: Math.round(l.tokens * 10) / 10, burst: l.burstSize };
   }
-  
-  return {
-    ...stats,
-    domainLimiters: limiters,
-  };
+  return { ...stats, domains: limiters };
 }
 
-// Reset stats
 export function resetStats() {
-  stats.requestsProcessed = 0;
+  stats.requestsProcessed   = 0;
   stats.requestsRateLimited = 0;
-  stats.connectionErrors = 0;
+  stats.connectionErrors    = 0;
 }

@@ -184,30 +184,28 @@ export function isLikelyBotBlock(statusCode, html, headers) {
 }
 
 /**
- * Get headers for bypassing Cloudflare with enhanced fingerprinting
+ * Get headers for bypassing Cloudflare with enhanced fingerprinting.
+ * Uses current Chrome 136 stable UA/sec-ch-ua so version strings are consistent.
  */
 export function getCloudflareBypassHeaders() {
+  const CV = '136';
+  const CVF = '136.0.7103.114';
   return {
-    // Standard browser headers
-    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'accept-encoding': 'gzip, deflate, br',
-    'accept-language': 'en-US,en;q=0.9,fr;q=0.8,de;q=0.7',
+    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'accept-encoding': 'gzip, deflate, br, zstd',
+    'accept-language': 'en-US,en;q=0.9',
     'cache-control': 'max-age=0',
-    'sec-ch-ua': '"Not A(Brand";v="99", "Chromium";v="96"',
+    'sec-ch-ua': `"Google Chrome";v="${CV}", "Chromium";v="${CV}", "Not/A)Brand";v="99"`,
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
+    'sec-ch-ua-platform-version': '"15.0.0"',
+    'sec-ch-ua-full-version-list': `"Google Chrome";v="${CVF}", "Chromium";v="${CVF}", "Not/A)Brand";v="99.0.0.0"`,
     'sec-fetch-dest': 'document',
     'sec-fetch-mode': 'navigate',
     'sec-fetch-site': 'none',
     'sec-fetch-user': '?1',
     'upgrade-insecure-requests': '1',
-    // TLS indicators
-    'tls-version': '1.3',
-    // Fingerprinting evasion
-    'sec-ch-ua-full-version-list': 'Not A(Brand";v="99.0.0.0", "Chromium";v="120.0.0.0"',
-    'sec-ch-ua-platform-version': '"15.0"',
-    'sec-ch-viewport-width': '1920',
-    'sec-ch-viewport-height': '1080',
+    'priority': 'u=0, i',
   };
 }
 
@@ -237,46 +235,52 @@ export async function addBrowserDelay() {
 }
 
 /**
- * Rotate through different browser profiles with more variations
+ * Browser profiles — all kept on current Chrome 136 / Firefox 138 stable
+ * (May 2026 releases) so User-Agent and sec-ch-ua always match.
  */
 const BROWSER_PROFILES = [
   {
-    name: 'Chrome Windows 10',
-    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    name: 'Chrome 136 Windows 11',
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
     platform: 'Windows',
-    chromeVersion: '120',
+    isChrome: true,
   },
   {
-    name: 'Firefox Ubuntu',
-    ua: 'Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    name: 'Chrome 136 macOS',
+    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+    platform: 'macOS',
+    isChrome: true,
+  },
+  {
+    name: 'Chrome 136 Linux',
+    ua: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
     platform: 'Linux',
+    isChrome: true,
   },
   {
-    name: 'Safari macOS',
-    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+    name: 'Edge 136 Windows',
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0',
+    platform: 'Windows',
+    isChrome: true,
+    isEdge: true,
+  },
+  {
+    name: 'Firefox 138 Windows',
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0',
+    platform: 'Windows',
+    isChrome: false,
+  },
+  {
+    name: 'Firefox 138 macOS',
+    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:138.0) Gecko/20100101 Firefox/138.0',
     platform: 'macOS',
+    isChrome: false,
   },
   {
-    name: 'Chrome macOS',
-    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    name: 'Safari 18 macOS',
+    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15',
     platform: 'macOS',
-    chromeVersion: '120',
-  },
-  {
-    name: 'Edge Windows',
-    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
-    platform: 'Windows',
-  },
-  {
-    name: 'Chrome Windows 11',
-    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-    platform: 'Windows',
-    chromeVersion: '119',
-  },
-  {
-    name: 'Firefox Windows',
-    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    platform: 'Windows',
+    isChrome: false,
   },
 ];
 
@@ -285,47 +289,14 @@ export function getRandomBrowserProfile() {
 }
 
 /**
- * Get anti-detection headers for specific depth/attempt
+ * Get anti-detection headers for a request.
+ * Proxy-identifying headers (x-forwarded-for, via, etc.) are NEVER added here —
+ * they are the primary signal bot-detection systems use to score proxy traffic.
+ * The depth argument is kept for API compatibility but no longer changes the
+ * header set in a proxy-announcing way.
  */
 export function getEnhancedAntiDetectionHeaders(depth = 0, hostname = '') {
-  if (hostname) {
-    return getEnhancedHeadersForSite(hostname, depth);
-  }
-
-  const profile = getRandomBrowserProfile();
-  
-  const headers = {
-    'user-agent': profile.ua,
-    ...getCloudflareBypassHeaders(),
-  };
-
-  // Only add aggressive proxy headers on retries (depth > 0)
-  if (depth > 0) {
-    const proxyHeaders = generateProxyHeaders();
-    if (depth === 1) {
-      headers['x-forwarded-for'] = proxyHeaders['x-forwarded-for'];
-      headers['x-real-ip'] = proxyHeaders['x-real-ip'];
-      headers['via'] = proxyHeaders['via'];
-    } else if (depth === 2) {
-      headers['x-forwarded-for'] = proxyHeaders['x-forwarded-for'];
-      headers['x-forwarded-proto'] = proxyHeaders['x-forwarded-proto'];
-      headers['x-real-ip'] = proxyHeaders['x-real-ip'];
-      headers['cf-connecting-ip'] = proxyHeaders['cf-connecting-ip'];
-      headers['via'] = proxyHeaders['via'];
-    } else {
-      Object.assign(headers, proxyHeaders);
-    }
-    
-    headers['cache-control'] = depth > 2 ? 'no-cache' : 'max-age=0';
-    if (depth > 2) {
-      headers['pragma'] = 'no-cache';
-      headers['expires'] = '0';
-    }
-  } else {
-    headers['cache-control'] = 'max-age=0';
-  }
-
-  return headers;
+  return getEnhancedHeadersForSite(hostname, depth);
 }
 
 /**

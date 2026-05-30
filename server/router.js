@@ -14,7 +14,7 @@ import { resolveWithFallback, isCloudflareIp } from './dns-resolver.js';
 import { isFilterDomain, getBypassHeaders, isFilterBlockPage } from './filter-bypass.js';
 import { getEnhancedAntiDetectionHeaders, isCloudflareChallenge, isCloudflareError1000, getCloudflareBypassHeaders, addBrowserDelay, addAdaptiveDelay, isBotDetectionPage, isLikelyBotBlock, stripProxyHeaders } from './advanced-evasion.js';
 import { detectChallengeType, hasCFClearance, extractCFRayId, attemptIUAMSolve } from './cloudflare-challenge.js';
-import { getSiteConfig, getMaxRetries, getSiteSpecificHeaders } from './site-configs.js';
+import { getSiteConfig, getMaxRetries, getSiteSpecificHeaders, noBypassHeaders } from './site-configs.js';
 import { shouldRetryRequest, getRetryDelayMs, analyzeErrorResponse } from './error-strategies.js';
 import { renderPageWithJS, handleJSChallenge, isAvailable as isBrowserAvailable, closeBrowser } from './browser-automation.js';
 import { solveCaptcha } from './captcha-solver.js';
@@ -846,33 +846,29 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
   }
 
   // Use enhanced anti-detection headers with site-specific configuration
-  let detectionHeaders = getEnhancedAntiDetectionHeaders(depth, url.hostname);
-  
-  // Apply bypass headers if we're retrying due to filter
-  if (depth > 0) {
-    detectionHeaders = { ...detectionHeaders, ...getBypassHeaders() };
+  const headers = getEnhancedAntiDetectionHeaders(depth, url.hostname);
+
+  // Apply content-filter bypass headers only on retries for sites where a
+  // google.com referer and no-cache flags make sense (school/ISP filters).
+  // Skip for search engines and other "clean" sites where these headers look
+  // more suspicious than the default clean-browser headers.
+  if (depth > 0 && !noBypassHeaders(url.hostname)) {
     const siteConfig = getSiteConfig(url.hostname);
-    const strategy = siteConfig?.strategy || 'standard';
-    console.log(`[BYPASS] Attempt ${depth} (${strategy}) with enhanced evasion headers for ${url.hostname}`);
+    const strategy   = siteConfig?.strategy || 'standard';
+    // Only inject bypass headers for filter-type strategies
+    if (strategy === 'aggressive' || strategy === 'ratelimit' || isFilterDomain(url.hostname)) {
+      Object.assign(headers, getBypassHeaders());
+    }
+    console.log(`[RETRY] Attempt ${depth} (${strategy}) for ${url.hostname}`);
   }
-  const headers = detectionHeaders;
-  
+
   // Override with host (required)
   headers['host'] = url.host;
 
   // Strip all proxy-identifying headers before sending upstream.
-  // These headers (x-forwarded-for, via, cf-connecting-ip, etc.) announce that the
-  // request is coming from a proxy/datacenter and are the primary signal Cloudflare's
-  // bot management uses to score and block requests.  They must never reach the target.
+  // These headers announce the request is from a proxy/datacenter and are the
+  // primary signal Cloudflare bot-management uses to score requests.
   Object.assign(headers, stripProxyHeaders(headers));
-  for (const k of Object.keys(headers)) {
-    const lk = k.toLowerCase();
-    if (lk.startsWith('x-forwarded') || lk === 'via' || lk === 'forwarded' ||
-        lk === 'x-real-ip' || lk === 'cf-connecting-ip' || lk === 'client-ip' ||
-        lk === 'x-originating-ip' || lk === 'x-client-ip' || lk === 'proxy-connection') {
-      delete headers[k];
-    }
-  }
 
   // Determine sec-fetch-* based on accept header (heuristic)
   const isDocumentReq = (req.headers['accept'] || '').includes('text/html') || (req.headers['sec-fetch-dest'] === 'document');

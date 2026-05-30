@@ -1320,30 +1320,71 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
           // Use recursive JSON rewriting for better handling of nested structures
           try {
             const jsonData = JSON.parse(text);
-            function rewriteJsonUrls(obj) {
+
+            // Keys whose string values are semantic identifiers (namespaces, schemas, types),
+            // not navigable resource URLs — rewriting them would corrupt any library that
+            // validates namespace URIs (XML validators, JSON-LD processors, OpenAPI parsers, etc.)
+            const JSON_NAMESPACE_KEYS = new Set([
+              '@context', '@type', '@vocab', '@base', '@id',
+              'namespace', 'xmlns', '$schema', 'schema',
+              'format', 'contentMediaType',
+            ]);
+
+            // Well-known namespace URI prefixes that are semantic identifiers, never resources
+            const NAMESPACE_URI_PREFIXES = [
+              'http://www.w3.org/',
+              'https://www.w3.org/',
+              'http://purl.org/',
+              'https://purl.org/',
+              'http://schema.org/',
+              'https://schema.org/',
+              'http://xmlns.com/',
+              'http://ns.adobe.com/',
+              'http://ogp.me/ns',
+              'http://json-schema.org/',
+              'https://json-schema.org/',
+              'http://iiif.io/',
+              'http://www.iana.org/',
+              'https://www.iana.org/',
+              'http://www.openarchives.org/',
+              'http://dublincore.org/',
+              'https://dublincore.org/',
+            ];
+
+            function isNamespaceUri(s) {
+              return NAMESPACE_URI_PREFIXES.some(p => s.startsWith(p));
+            }
+
+            // parentKey: the object key whose value we are currently visiting,
+            // used to skip rewriting values that carry semantic namespace meaning
+            function rewriteJsonUrls(obj, parentKey) {
               if (!obj) return obj;
               if (typeof obj === 'string') {
+                // Guard: never rewrite namespace/schema/semantic-identifier strings
+                if (JSON_NAMESPACE_KEYS.has(parentKey) || isNamespaceUri(obj)) return obj;
                 if (/^https?:\/\//i.test(obj) && !isAlreadyProxied(obj) && !isCaptchaUrl(obj)) {
                   const abs = resolveUrl(url.toString(), obj);
                   return abs ? toProxyUrl(abs) : obj;
                 }
                 return obj;
               }
-              if (Array.isArray(obj)) return obj.map(rewriteJsonUrls);
+              if (Array.isArray(obj)) return obj.map(item => rewriteJsonUrls(item, parentKey));
               if (typeof obj === 'object') {
                 const result = {};
                 for (const [k, v] of Object.entries(obj)) {
-                  result[k] = rewriteJsonUrls(v);
+                  result[k] = rewriteJsonUrls(v, k);
                 }
                 return result;
               }
               return obj;
             }
-            out = JSON.stringify(rewriteJsonUrls(jsonData));
+            out = JSON.stringify(rewriteJsonUrls(jsonData, null));
           } catch {
-            // Fallback to regex if JSON parsing fails
+            // Fallback to regex if JSON parsing fails — skip namespace URIs here too
             out = text.replace(/(?<!\\)"(https?:\/\/[^"\\]+)(?<!\\)"/g, (m, u) => {
               if (isAlreadyProxied(u) || isCaptchaUrl(u)) return m;
+              // Skip well-known namespace URI prefixes
+              if (/^https?:\/\/(www\.w3\.org|purl\.org|schema\.org|xmlns\.com|ns\.adobe\.com|ogp\.me\/ns|json-schema\.org|iiif\.io|www\.iana\.org|www\.openarchives\.org|dublincore\.org)/.test(u)) return m;
               return '"' + toProxyUrl(u) + '"';
             });
           }

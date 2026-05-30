@@ -116,14 +116,16 @@ function extractOriginalFromProxy(u) {
 }
 
 function rewriteCss(css, baseUrl) {
-  css = css.replace(/url\(\s*("([^"]*)"|'([^']*)'|([^)'"]\S*))\s*\)/gi, (m, _all, dq, sq, uq) => {
+  // Note: unquoted URL uses [^)'"\s]+ (excludes ) entirely) to prevent the
+  // greedy \S* from crossing ) boundaries and capturing subsequent CSS rules.
+  css = css.replace(/url\(\s*("([^"]*)"|'([^']*)'|([^)'"\s]+))\s*\)/gi, (m, _all, dq, sq, uq) => {
     const v = (dq ?? sq ?? uq ?? '').trim();
     if (!v || /^(data:|blob:|about:|#)/i.test(v) || isAlreadyProxied(v)) return m;
     const abs = resolveUrl(baseUrl, v);
     if (!abs) return m;
     return 'url("' + toProxyUrl(abs) + '")';
   });
-  css = css.replace(/@import\s+url\(\s*("([^"]*)"|'([^']*)'|([^)'"]\S*))\s*\)/gi, (m, _all, dq, sq, uq) => {
+  css = css.replace(/@import\s+url\(\s*("([^"]*)"|'([^']*)'|([^)'"\s]+))\s*\)/gi, (m, _all, dq, sq, uq) => {
     const v = (dq ?? sq ?? uq ?? '').trim();
     if (!v || isAlreadyProxied(v)) return m;
     const abs = resolveUrl(baseUrl, v);
@@ -361,7 +363,9 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
   });
 
   // Rewrite url() outside of attributes (inline CSS background images etc.)
-  html = html.replace(/url\(\s*("([^"]*)"|'([^']*)'|([^)'"]\S*))\s*\)/gi, (m, _all, dq, sq, uq) => {
+  // Unquoted variant uses [^)'"\s]+ to prevent greedy \S* from crossing )
+  // boundaries and capturing subsequent CSS rules as part of the URL.
+  html = html.replace(/url\(\s*("([^"]*)"|'([^']*)'|([^)'"\s]+))\s*\)/gi, (m, _all, dq, sq, uq) => {
     const v = (dq ?? sq ?? uq ?? '').trim();
     if (!v || /^(data:|blob:|about:)/i.test(v) || isAlreadyProxied(v)) return m;
     const abs = resolveUrl(baseUrl, v);

@@ -45,18 +45,20 @@ const CAPTCHA_PATTERNS = [
     /arcose|arkose/i,
     /friendly-captcha/i,
   ]},
-  
-  // Generic challenge patterns
+
+  // Specific captcha/challenge service patterns — kept narrow to avoid
+  // matching legitimate site pages that happen to use the word "challenge"
+  // (e.g. DuckDuckGo's own bot-challenge page, Bing Rewards challenges, etc.)
   { domain: null, paths: [], patterns: [
-    /recaptcha/i,
-    /hcaptcha/i,
-    /turnstile/i,
-    /grecaptcha/i,
-    /cf-challenge/i,
+    /\brecaptcha\b/i,
+    /\bhcaptcha\b/i,
+    /\bturnstile\b/i,
+    /\bgrecaptcha\b/i,
+    /\bcf-challenge\b/i,
     /challenge-platform/i,
-    /captcha/i,
-    /challenge/i,
-    /verify/i,
+    // Match "captcha" only when it appears in the hostname or as a path segment
+    // — NOT in query strings or fragment where regular sites may use it
+    /^https?:\/\/[^/?#]*captcha[^/?#]*\//i,
   ]},
 ];
 

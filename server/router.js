@@ -10,7 +10,7 @@ import { generateRandomHeaders, injectAntiDetectionScript, cleanResponseHeaders 
 import { shouldCache, getCacheTTL, getCached, setCached, getCacheStats } from './response-cache.js';
 import { getDomainConfig, shouldPreserveAuth, handlesJsonApi, getRateLimit } from './domain-handler.js';
 import { globalRetry } from './error-recovery.js';
-import { resolveWithFallback } from './dns-resolver.js';
+import { resolveWithFallback, isCloudflareIp } from './dns-resolver.js';
 import { isFilterDomain, getBypassHeaders, isFilterBlockPage } from './filter-bypass.js';
 import { getEnhancedAntiDetectionHeaders, isCloudflareChallenge, getCloudflareBypassHeaders, addBrowserDelay, addAdaptiveDelay, isBotDetectionPage, isLikelyBotBlock } from './advanced-evasion.js';
 import { getSiteConfig, getMaxRetries, getSiteSpecificHeaders } from './site-configs.js';
@@ -954,26 +954,40 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
   // Use pooled agent for connection reuse and rate limiting
   const pooledAgent = getAgent(url.hostname, isHttps);
   
-  // Try to resolve with alternative DNS to bypass ISP blocks
+  // Try to resolve with alternative DNS to bypass ISP blocks.
+  // Exception: Cloudflare edge IPs must never be used as direct connection targets —
+  // connecting to them by IP without SNI causes Error 1000 ("DNS points to prohibited IP")
+  // because Cloudflare's shared edge requires the TLS SNI hostname to route the request.
   let resolvedIp = url.hostname;
   try {
-    resolvedIp = await resolveWithFallback(url.hostname);
-    if (resolvedIp && resolvedIp !== url.hostname) {
-      console.log(`[BYPASS] Using IP ${resolvedIp} for ${url.hostname}`);
+    const candidate = await resolveWithFallback(url.hostname);
+    if (candidate && candidate !== url.hostname) {
+      if (isCloudflareIp(candidate)) {
+        console.log(`[BYPASS] ${url.hostname} -> ${candidate} is a Cloudflare edge IP, using hostname directly to preserve SNI`);
+        // Leave resolvedIp = url.hostname so the OS resolves it with full SNI
+      } else {
+        resolvedIp = candidate;
+        console.log(`[BYPASS] Using IP ${resolvedIp} for ${url.hostname}`);
+      }
     }
   } catch (err) {
     console.log(`[BYPASS] Failed to resolve ${url.hostname}, using hostname directly`);
     // Fall through to use hostname
   }
-  
+
+  // When connecting via a raw IP, TLS has no hostname for SNI unless we set servername.
+  // Missing SNI breaks any CDN or virtual-host that routes by domain (Cloudflare, Fastly, etc.)
+  const usingIp = resolvedIp !== url.hostname;
+
   const options = {
-    hostname: resolvedIp,  // Use resolved IP to bypass DNS blocks
+    hostname: resolvedIp,
     port: url.port || (isHttps ? 443 : 80),
     path: url.pathname + url.search,
     method: req.method,
     headers,
     rejectUnauthorized: false,
     agent: pooledAgent,
+    ...(isHttps && usingIp ? { servername: url.hostname } : {}),
   };
 
   // Debug logging for problematic sites

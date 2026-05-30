@@ -131,6 +131,52 @@ function isPrivateIp(ip) {
 }
 
 /**
+ * Cloudflare published IPv4 CIDR ranges (https://www.cloudflare.com/ips-v4/).
+ * Connecting to these IPs directly without proper SNI causes Error 1000
+ * ("DNS points to prohibited IP") because Cloudflare's shared edge does not
+ * accept bare-IP connections — it needs the SNI hostname to route correctly.
+ * We detect these and fall back to using the hostname directly so the OS
+ * resolver + TLS SNI handle the connection normally.
+ */
+// Precomputed [network_int, mask_int] pairs for fast matching
+const CF_CIDRS = [
+  [ip4ToInt('103.21.244.0'),  cidrMask(22)],
+  [ip4ToInt('103.22.200.0'),  cidrMask(22)],
+  [ip4ToInt('103.31.4.0'),    cidrMask(22)],
+  [ip4ToInt('104.16.0.0'),    cidrMask(13)],
+  [ip4ToInt('104.24.0.0'),    cidrMask(14)],
+  [ip4ToInt('108.162.192.0'), cidrMask(18)],
+  [ip4ToInt('131.0.72.0'),    cidrMask(22)],
+  [ip4ToInt('141.101.64.0'),  cidrMask(18)],
+  [ip4ToInt('162.158.0.0'),   cidrMask(15)],
+  [ip4ToInt('172.64.0.0'),    cidrMask(13)],
+  [ip4ToInt('173.245.48.0'),  cidrMask(20)],
+  [ip4ToInt('188.114.96.0'),  cidrMask(20)],
+  [ip4ToInt('190.93.240.0'),  cidrMask(20)],
+  [ip4ToInt('197.234.240.0'), cidrMask(22)],
+  [ip4ToInt('198.41.128.0'),  cidrMask(17)],
+];
+
+function ip4ToInt(ip) {
+  return ip.split('.').reduce((acc, o) => (acc << 8) + parseInt(o, 10), 0) >>> 0;
+}
+
+function cidrMask(bits) {
+  return (bits === 0 ? 0 : (~0 << (32 - bits))) >>> 0;
+}
+
+/**
+ * Returns true when the IP falls inside any of Cloudflare's published ranges.
+ * Exported so router.js can skip the IP-bypass path for Cloudflare targets.
+ */
+export function isCloudflareIp(ip) {
+  // Only handle IPv4 for now
+  if (!ip || !/^\d+\.\d+\.\d+\.\d+$/.test(ip)) return false;
+  const n = ip4ToInt(ip);
+  return CF_CIDRS.some(([net, mask]) => (n & mask) === net);
+}
+
+/**
  * Resolve using specific DNS servers
  */
 function resolveThroughDns(hostname, servers) {

@@ -63,22 +63,38 @@ export function isCloudflareError1000(html) {
 }
 
 /**
- * Detect Cloudflare challenge pages (IUAM / JS challenge / Turnstile).
- * Deliberately excludes Error 1000 — that is handled separately.
+ * Detect Cloudflare INTERSTITIAL challenge pages (IUAM / JS challenge / Turnstile).
+ * Deliberately excludes Error 1000 (handled separately) and regular pages that merely
+ * EMBED a Turnstile widget (e.g. dash.cloudflare.com/login with status 200) — those
+ * are real content pages and must be rendered normally, not treated as a challenge.
+ *
+ * @param {string} html - Response body
+ * @param {number} [statusCode=200] - HTTP status code of the response
  */
-export function isCloudflareChallenge(html) {
+export function isCloudflareChallenge(html, statusCode = 200) {
   if (!html || typeof html !== 'string') return false;
-  // Don't treat Error 1000 as a retryable challenge
   if (isCloudflareError1000(html)) return false;
+
   const lower = html.toLowerCase();
-  return (
-    lower.includes('checking your browser') ||
-    lower.includes('cf_clearance') ||
-    lower.includes('chk_jschl') ||
-    lower.includes('challenge-platform') ||
-    (lower.includes('just a moment') && lower.includes('cloudflare')) ||
-    (lower.includes('turnstile') && lower.includes('cloudflare'))
-  );
+
+  // Old IUAM math challenge — always an interstitial, always qualifies.
+  if (lower.includes('chk_jschl') || lower.includes('jschl_vc')) return true;
+
+  // CF's interstitial-specific JS variable — never present in regular pages.
+  if (lower.includes('window._cf_chl_opt') || lower.includes('window.__cf$cv$params')) return true;
+
+  // "Just a moment…" is CF's canonical interstitial title.
+  if (lower.includes('just a moment') && lower.includes('cloudflare')) return true;
+
+  // Modern managed / Turnstile interstitials come with a 403 or 503.
+  // A 200 page that embeds Turnstile (e.g. a login form) is NOT an interstitial.
+  if (statusCode === 403 || statusCode === 503) {
+    if (lower.includes('cf-challenge') || lower.includes('orchestrate/managed')) return true;
+    if (lower.includes('checking your browser')) return true;
+    if (lower.includes('challenge-platform') && lower.includes('cloudflare')) return true;
+  }
+
+  return false;
 }
 
 /**

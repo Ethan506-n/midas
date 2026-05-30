@@ -752,7 +752,23 @@ function proxyRequest(req, res, targetUrl, options = {}) {
       if (isPassthrough) {
         outHeaders['access-control-allow-origin'] = req.headers['origin'] || '*';
         outHeaders['access-control-allow-credentials'] = 'true';
+
+        // Rewrite Location header so post-challenge redirects route back through
+        // our proxy instead of sending the browser directly to the target origin.
+        // Without this, Turnstile's completion 302 → dash.cloudflare.com/login
+        // bypasses the proxy entirely, causing a white screen.
+        if (outHeaders['location']) {
+          const resolved = resolveUrl(targetUrl, outHeaders['location']);
+          if (resolved) {
+            outHeaders['location'] = toProxyUrl(resolved);
+          }
+        }
       }
+
+      // Strip additional isolation headers that passthrough path previously kept
+      delete outHeaders['cross-origin-opener-policy'];
+      delete outHeaders['cross-origin-embedder-policy'];
+      delete outHeaders['cross-origin-resource-policy'];
 
       res.writeHead(proxyRes.statusCode, outHeaders);
       proxyRes.pipe(res);
@@ -1224,7 +1240,7 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
           return;
         }
 
-        if (isHtml && isCloudflareChallenge(text)) {
+        if (isHtml && isCloudflareChallenge(text, proxyRes.statusCode)) {
           const challengeType = detectChallengeType(text);
           const rayId = extractCFRayId(text) || 'unknown';
           console.log(`[CF] ${challengeType} challenge on ${url.hostname} (ray:${rayId})`);

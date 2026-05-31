@@ -210,6 +210,36 @@
     } catch (e) { return url; }
   }
 
+  // Challenge-service domains that must load from their REAL origin so that
+  // their postMessage origin checks pass.  These widgets (Turnstile, hCaptcha,
+  // reCAPTCHA…) are designed for cross-origin embedding; proxying them through
+  // /_midas/… replaces their origin with ours and breaks the parent's
+  // `event.origin === 'https://challenges.cloudflare.com'` guard.
+  var _CHALLENGE_DOMAINS = [
+    'challenges.cloudflare.com',
+    'js.hcaptcha.com',
+    'api.hcaptcha.com',
+    'newassets.hcaptcha.com',
+    'hcaptcha.com',
+    'www.google.com',
+    'www.gstatic.com',
+    'www.recaptcha.net',
+    'recaptcha.net',
+    'waf.amazonaws.com',
+    'arkoselabs.com',
+    'client-api.arkoselabs.com',
+    'funcaptcha.com',
+  ];
+
+  function _isChallengeServiceHost(hostname) {
+    hostname = hostname.toLowerCase();
+    for (var _ci = 0; _ci < _CHALLENGE_DOMAINS.length; _ci++) {
+      var d = _CHALLENGE_DOMAINS[_ci];
+      if (hostname === d || hostname.slice(-(d.length + 1)) === '.' + d) return true;
+    }
+    return false;
+  }
+
   function shouldProxy(url) {
     if (!url) return false;
     // Handle TrustedScriptURL and other non-string URL-like objects
@@ -231,6 +261,9 @@
         // the real window.location.origin before our virtualiser ran).
         return _isMisroutedTargetPath(parsed.pathname);
       }
+      // Let challenge-service domains (Turnstile, hCaptcha, reCAPTCHA…) load
+      // directly from their real origin so postMessage origin checks pass.
+      if (_isChallengeServiceHost(parsed.hostname)) return false;
       return true;
     } catch (e) { return false; }
   }

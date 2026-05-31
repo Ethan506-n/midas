@@ -89,6 +89,46 @@ function isSDKUrl(url) {
   } catch { return false; }
 }
 
+// Challenge-service domains that must NEVER be proxy-rewritten.
+//
+// Turnstile (CF), hCaptcha, reCAPTCHA and friends work via an iframe whose
+// *origin* must be their real domain so the parent page's postMessage handler
+// can verify `event.origin === 'https://challenges.cloudflare.com'` (etc.).
+// If we proxy these iframes through /_midas/… they run at *our* proxy origin,
+// the origin check fails, the widget stalls, and the user sees a white screen.
+//
+// These services are designed for cross-origin embedding — the browser can
+// reach them directly.  We skip rewriting their URLs and let the browser load
+// them from the real origin.  The challenge widget's API calls are all
+// same-origin from inside the iframe, so no CORS issues arise.
+const CHALLENGE_PASSTHROUGH_DOMAINS = new Set([
+  'challenges.cloudflare.com',
+  'js.hcaptcha.com',
+  'api.hcaptcha.com',
+  'newassets.hcaptcha.com',
+  'hcaptcha.com',
+  'www.google.com',      // reCAPTCHA
+  'www.gstatic.com',     // reCAPTCHA static assets
+  'www.recaptcha.net',
+  'recaptcha.net',
+  'waf.amazonaws.com',
+  'arkoselabs.com',
+  'client-api.arkoselabs.com',
+  'funcaptcha.com',
+]);
+
+function isChallengeServiceUrl(url) {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    if (CHALLENGE_PASSTHROUGH_DOMAINS.has(h)) return true;
+    // subdomain match
+    for (const d of CHALLENGE_PASSTHROUGH_DOMAINS) {
+      if (h.endsWith('.' + d)) return true;
+    }
+    return false;
+  } catch { return false; }
+}
+
 // XML/RDF namespace URIs (e.g. http://www.w3.org/1999/xhtml, http://www.w3.org/2000/svg)
 // are identifier strings used by libraries like DOMPurify for element validation.
 // They are NOT browsable URLs and must NEVER be proxy-rewritten — doing so corrupts
@@ -323,6 +363,9 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
       if (isAlreadyProxied(v)) return m;
       const abs = resolveUrl(baseUrl, v);
       if (!abs) return m;
+      // Let challenge-service domains (Turnstile, hCaptcha, reCAPTCHA…) load
+      // from their real origin so their iframe postMessage origin checks pass.
+      if (isChallengeServiceUrl(abs)) return m;
       return attr + '="' + toProxyUrl(abs) + '"';
     }
   );
@@ -427,17 +470,17 @@ function rewriteJs(js, baseUrl) {
   // Use (?<!\\) lookbehind to avoid matching JSON-escaped \"url\" sequences (prevents %5C corruption)
   // Use [^"\\\s] to also exclude backslash from URL content
   js = js.replace(/(?<!\\)"(https?:\/\/[^"\\\s]{3,})(?<!\\)"/g, (m, u) => {
-    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u) || isXmlNamespaceUrl(u)) return m;
+    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u) || isXmlNamespaceUrl(u) || isChallengeServiceUrl(u)) return m;
     return '"' + toProxyUrl(u) + '"';
   });
   // Absolute URL strings in single quotes
   js = js.replace(/(?<!\\)'(https?:\/\/[^'\\\s]{3,})(?<!\\)'/g, (m, u) => {
-    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u) || isXmlNamespaceUrl(u)) return m;
+    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u) || isXmlNamespaceUrl(u) || isChallengeServiceUrl(u)) return m;
     return "'" + toProxyUrl(u) + "'";
   });
   // Absolute URL template literals (simple, no expressions)
   js = js.replace(/`(https?:\/\/[^`$\\\s]{3,})`/g, (m, u) => {
-    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u) || isXmlNamespaceUrl(u)) return m;
+    if (isAlreadyProxied(u) || isCaptchaUrl(u) || isSDKUrl(u) || isXmlNamespaceUrl(u) || isChallengeServiceUrl(u)) return m;
     return '`' + toProxyUrl(u) + '`';
   });
 
@@ -446,14 +489,14 @@ function rewriteJs(js, baseUrl) {
   js = js.replace(/(?<!\\)"(\/\/[^"\r\n]{2,})(?<!\\)"/g, (m, u) => {
     if (isAlreadyProxied(u)) return m;
     const abs = 'https:' + u;
-    if (isCaptchaUrl(abs) || isSDKUrl(abs)) return m;
+    if (isCaptchaUrl(abs) || isSDKUrl(abs) || isChallengeServiceUrl(abs)) return m;
     return '"' + toProxyUrl(abs) + '"';
   });
 
   js = js.replace(/(?<!\\)'(\/\/[^'\r\n]{2,})(?<!\\)'/g, (m, u) => {
     if (isAlreadyProxied(u)) return m;
     const abs = 'https:' + u;
-    if (isCaptchaUrl(abs) || isSDKUrl(abs)) return m;
+    if (isCaptchaUrl(abs) || isSDKUrl(abs) || isChallengeServiceUrl(abs)) return m;
     return "'" + toProxyUrl(abs) + "'";
   });
 

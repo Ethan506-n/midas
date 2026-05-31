@@ -206,6 +206,11 @@
         // Proxy-server–owned path — let it pass through unchanged.
         return url;
       }
+      // Challenge-service URLs must reach their real origin — not our proxy.
+      // Return the absolute URL so the browser navigates / fetches directly.
+      // Returning the original (possibly relative) url would make the browser
+      // resolve it against our proxy origin, sending the request to our server.
+      if (_isChallengeUrl(abs)) return abs;
       return PROXY_BASE + '?url=' + encodeURIComponent(abs);
     } catch (e) { return url; }
   }
@@ -304,7 +309,10 @@
         get: _scrSrcDesc.get,
         set: function (v) {
           var url = (v && typeof v === 'object' && v.toString) ? v.toString() : String(v || '');
-          if (url && shouldProxy(url)) url = toProxy(url);
+          // Always call toProxy — it now returns absolute target-domain URLs for
+          // challenge-service paths (instead of proxying them), so relative
+          // challenge URLs resolve to the target domain, not our proxy origin.
+          if (url) url = toProxy(url);
           _scrSrcDesc.set.call(this, url);
         },
         configurable: true,
@@ -319,7 +327,7 @@
         get: _lnkHrefDesc.get,
         set: function (v) {
           var url = (v && typeof v === 'object' && v.toString) ? v.toString() : String(v || '');
-          if (url && shouldProxy(url)) url = toProxy(url);
+          if (url) url = toProxy(url);
           _lnkHrefDesc.set.call(this, url);
         },
         configurable: true,
@@ -334,7 +342,7 @@
         get: _imgSrcDesc.get,
         set: function (v) {
           var url = (v && typeof v === 'object' && v.toString) ? v.toString() : String(v || '');
-          if (url && shouldProxy(url)) url = toProxy(url);
+          if (url) url = toProxy(url);
           _imgSrcDesc.set.call(this, url);
         },
         configurable: true,
@@ -382,14 +390,16 @@
     if (node.tagName === 'SCRIPT') {
       var scriptSrc = node.getAttribute('src');
       if (scriptSrc && scriptSrc.indexOf('/_midas/') === -1 && scriptSrc.indexOf('data:') !== 0 && scriptSrc.indexOf('blob:') !== 0) {
-        if (shouldProxy(scriptSrc)) node.setAttribute('src', toProxy(scriptSrc));
+        var patchedSrc = toProxy(scriptSrc);
+        if (patchedSrc !== scriptSrc) node.setAttribute('src', patchedSrc);
       }
     }
     // Patch LINK href (stylesheets, preloads, modulepreloads)
     if (node.tagName === 'LINK') {
       var linkHref = node.getAttribute('href');
       if (linkHref && linkHref.indexOf('/_midas/') === -1 && linkHref.indexOf('data:') !== 0) {
-        if (shouldProxy(linkHref)) node.setAttribute('href', toProxy(linkHref));
+        var patchedHref = toProxy(linkHref);
+        if (patchedHref !== linkHref) node.setAttribute('href', patchedHref);
       }
     }
     if (node.tagName === 'IMG' || node.tagName === 'VIDEO' || node.tagName === 'AUDIO' || node.tagName === 'SOURCE') {

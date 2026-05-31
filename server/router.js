@@ -385,9 +385,16 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
       if (isAlreadyProxied(v)) return m;
       const abs = resolveUrl(baseUrl, v);
       if (!abs) return m;
-      // Let challenge-service domains (Turnstile, hCaptcha, reCAPTCHA…) load
-      // from their real origin so their iframe postMessage origin checks pass.
-      if (isChallengeServiceUrl(abs)) return m;
+      // Challenge-service URLs (Turnstile, hCaptcha, /cdn-cgi/challenge-platform/…)
+      // must reach their real origin — not our proxy.
+      // • Absolute challenge URLs: leave the attribute exactly as-is.
+      // • Relative challenge URLs: rewrite to absolute form pointing to the real
+      //   target domain. Leaving a relative URL alone would make the browser
+      //   resolve it against our proxy origin and request it from our server.
+      if (isChallengeServiceUrl(abs)) {
+        const isAlreadyAbsolute = /^https?:\/\//i.test(v) || v.startsWith('//');
+        return isAlreadyAbsolute ? m : attr + '="' + abs + '"';
+      }
       return attr + '="' + toProxyUrl(abs) + '"';
     }
   );

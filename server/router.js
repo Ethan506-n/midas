@@ -119,12 +119,34 @@ const CHALLENGE_PASSTHROUGH_DOMAINS = new Set([
 
 function isChallengeServiceUrl(url) {
   try {
-    const h = new URL(url).hostname.toLowerCase();
+    const parsed = new URL(url);
+    const h = parsed.hostname.toLowerCase();
+    const p = parsed.pathname.toLowerCase();
+    const q = parsed.search.toLowerCase();
+
+    // Known challenge-service hostnames (Turnstile, hCaptcha, reCAPTCHA…)
     if (CHALLENGE_PASSTHROUGH_DOMAINS.has(h)) return true;
-    // subdomain match
     for (const d of CHALLENGE_PASSTHROUGH_DOMAINS) {
       if (h.endsWith('.' + d)) return true;
     }
+
+    // /cdn-cgi/challenge-platform/ paths on ANY domain.
+    // These are the CF challenge orchestration/validation scripts.
+    // When our proxy server fetches them CF sees a datacenter IP and returns
+    // ANOTHER challenge — creating an infinite loop.  The browser can fetch
+    // them directly (its IP is a real user) and the challenge completes.
+    if (p.includes('/cdn-cgi/challenge-platform/')) return true;
+
+    // /cdn-cgi/l/chk_jschl  — old IUAM token exchange (IP-locked)
+    if (p.includes('/cdn-cgi/l/chk_jschl')) return true;
+
+    // __cf_chl_rt_tk  — post-challenge redirect token.  CF issues this after
+    // the challenge is solved in the user's browser and ties it to the browser's
+    // IP.  When our server forwards the request with this token, CF rejects it
+    // (wrong IP) and issues yet another challenge.  Let the browser submit it
+    // directly so CF can validate it against the correct source IP.
+    if (q.includes('__cf_chl_rt_tk=')) return true;
+
     return false;
   } catch { return false; }
 }

@@ -240,6 +240,26 @@
     return false;
   }
 
+  function _isChallengeUrl(absUrl) {
+    try {
+      var p = new URL(absUrl);
+      // Known challenge-service hostnames
+      if (_isChallengeServiceHost(p.hostname)) return true;
+      var path = p.pathname.toLowerCase();
+      var search = p.search.toLowerCase();
+      // CF challenge orchestration/validation scripts on ANY domain.
+      // When our proxy server fetches /cdn-cgi/challenge-platform/ CF sees a
+      // datacenter IP and returns another challenge → infinite loop.
+      if (path.indexOf('/cdn-cgi/challenge-platform/') !== -1) return true;
+      // Old IUAM token exchange — IP-locked
+      if (path.indexOf('/cdn-cgi/l/chk_jschl') !== -1) return true;
+      // Post-challenge redirect token — IP-locked to user browser's IP.
+      // Our server can't submit it; must go direct from browser.
+      if (search.indexOf('__cf_chl_rt_tk=') !== -1) return true;
+    } catch (e) {}
+    return false;
+  }
+
   function shouldProxy(url) {
     if (!url) return false;
     // Handle TrustedScriptURL and other non-string URL-like objects
@@ -261,9 +281,13 @@
         // the real window.location.origin before our virtualiser ran).
         return _isMisroutedTargetPath(parsed.pathname);
       }
-      // Let challenge-service domains (Turnstile, hCaptcha, reCAPTCHA…) load
-      // directly from their real origin so postMessage origin checks pass.
-      if (_isChallengeServiceHost(parsed.hostname)) return false;
+      // Let challenge-service URLs load / submit directly from the browser:
+      //  • challenge-service domains (Turnstile, hCaptcha, reCAPTCHA…) so
+      //    their iframe postMessage origin checks pass
+      //  • /cdn-cgi/challenge-platform/ paths on any domain (CF orchestration
+      //    scripts — proxying causes infinite challenge loops)
+      //  • URLs with __cf_chl_rt_tk (IP-locked CF challenge tokens)
+      if (_isChallengeUrl(abs)) return false;
       return true;
     } catch (e) { return false; }
   }

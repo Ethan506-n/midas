@@ -131,16 +131,6 @@ function isChallengeServiceUrl(url) {
       if (h.endsWith('.' + d)) return true;
     }
 
-    // /cdn-cgi/challenge-platform/ paths on ANY domain.
-    // These are the CF challenge orchestration/validation scripts.
-    // When our proxy server fetches them CF sees a datacenter IP and returns
-    // ANOTHER challenge — creating an infinite loop.  The browser can fetch
-    // them directly (its IP is a real user) and the challenge completes.
-    if (p.includes('/cdn-cgi/challenge-platform/')) return true;
-
-    // /cdn-cgi/l/chk_jschl  — old IUAM token exchange (IP-locked)
-    if (p.includes('/cdn-cgi/l/chk_jschl')) return true;
-
     // __cf_chl_rt_tk  — post-challenge redirect token.  CF issues this after
     // the challenge is solved in the user's browser and ties it to the browser's
     // IP.  When our server forwards the request with this token, CF rejects it
@@ -372,21 +362,30 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
   html = html.replace(/(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi,
     (_m, open, body, close) => open + rewriteCss(body, baseUrl) + close);
 
-  // Rewrite <script type="importmap"> content
-  html = html.replace(/(<script\b[^>]*type\s*=\s*["']importmap["'][^>]*>)([\s\S]*?)(<\/script>)/gi,
-    (_m, open, body, close) => open + rewriteImportMap(body, baseUrl) + close);
+  // Detect challenge/CAPTCHA pages early — before any JS rewriting.
+  // Cloudflare/hCaptcha/reCAPTCHA scripts are heavily obfuscated; running them
+  // through rewriteJs() silently corrupts them and breaks the widget.
+  // We still rewrite HTML attributes (src, href, action…) and inject sandbox.js
+  // so navigation and fetch calls from the challenge page are handled correctly.
+  const isChallengePage = isCaptchaHtml(html);
 
-  // Rewrite inline <script type="module"> imports
-  html = html.replace(/(<script\b[^>]*type\s*=\s*["']module["'][^>]*>)([\s\S]*?)(<\/script>)/gi,
-    (_m, open, body, close) => open + rewriteModuleImports(rewriteJs(body, baseUrl), baseUrl) + close);
+  if (!isChallengePage) {
+    // Rewrite <script type="importmap"> content
+    html = html.replace(/(<script\b[^>]*type\s*=\s*["']importmap["'][^>]*>)([\s\S]*?)(<\/script>)/gi,
+      (_m, open, body, close) => open + rewriteImportMap(body, baseUrl) + close);
 
-  // Rewrite JSON-LD structured data (<script type="application/ld+json">)
-  html = html.replace(/(<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>)([\s\S]*?)(<\/script>)/gi,
-    (_m, open, body, close) => open + rewriteJsonLd(body.trim(), baseUrl) + close);
+    // Rewrite inline <script type="module"> imports
+    html = html.replace(/(<script\b[^>]*type\s*=\s*["']module["'][^>]*>)([\s\S]*?)(<\/script>)/gi,
+      (_m, open, body, close) => open + rewriteModuleImports(rewriteJs(body, baseUrl), baseUrl) + close);
 
-  // Rewrite inline <script> (non-module) blocks
-  html = html.replace(/(<script\b(?![^>]*type\s*=\s*["'](?:module|importmap|text\/template|text\/html|application\/(?:json|ld\+json))["'])[^>]*>)([\s\S]*?)(<\/script>)/gi,
-    (_m, open, body, close) => open + rewriteJs(body, baseUrl) + close);
+    // Rewrite JSON-LD structured data (<script type="application/ld+json">)
+    html = html.replace(/(<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>)([\s\S]*?)(<\/script>)/gi,
+      (_m, open, body, close) => open + rewriteJsonLd(body.trim(), baseUrl) + close);
+
+    // Rewrite inline <script> (non-module) blocks
+    html = html.replace(/(<script\b(?![^>]*type\s*=\s*["'](?:module|importmap|text\/template|text\/html|application\/(?:json|ld\+json))["'])[^>]*>)([\s\S]*?)(<\/script>)/gi,
+      (_m, open, body, close) => open + rewriteJs(body, baseUrl) + close);
+  }
 
   // meta refresh redirect
   html = html.replace(/<meta\b([^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*)>/gi, (m, attrs) => {
@@ -513,13 +512,18 @@ function rewriteHtml(html, baseUrl, baseProxyUrl) {
       return pre + toProxyUrl(abs) + post;
     });
 
-  const isChallengePage = isCaptchaHtml(html);
-  if (!isChallengePage) {
-    // Inject anti-detection script early (before sandbox)
-    const antiDetectionScript = '<script>' + injectAntiDetectionScript() + '</script>';
+  // Always inject sandbox.js so fetch/navigation hooks are active — challenge
+  // pages need it to route /cdn-cgi/challenge-platform/ requests through the
+  // proxy rather than making blocked cross-origin direct requests.
+  // Anti-detection script is skipped for challenge pages to keep the page
+  // environment as close to native as possible.
+  {
+    const antiDetectionScript = isChallengePage
+      ? ''
+      : '<script>' + injectAntiDetectionScript() + '</script>';
     const stealthScript = getStealthScript(baseUrl);
     const injectionScript = antiDetectionScript + stealthScript;
-    
+
     // Inject as the FIRST thing inside <head> so our hooks run before any
     // other scripts (including socket.io, Firebase, etc.) can read and cache
     // real location.origin / location.hostname values.
@@ -1484,21 +1488,20 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
               outHeaders['content-type'] = 'text/html; charset=utf-8';
               delete outHeaders['content-length'];
               res.writeHead(proxyRes.statusCode || 403, outHeaders);
-              res.end(rewriteChallengeHtml(text, url.toString()));
+              res.end(rewriteHtml(text, url.toString(), baseProxyUrl));
             }
             return;
           }
 
           // --- Turnstile / Managed challenge: serve to user ---
-          // The challenge page must run natively in the user's browser — we use
-          // rewriteChallengeHtml() which injects <base href="real-origin/"> so
-          // relative /cdn-cgi/challenge-platform/ paths resolve to the real site,
-          // not our proxy.  We intentionally skip rewriteJs() and sandbox.js here
-          // so the obfuscated challenge code runs intact.
+          // rewriteHtml() now skips rewriteJs() for challenge pages (preserving
+          // obfuscated challenge code) while still injecting sandbox.js so that
+          // /cdn-cgi/challenge-platform/ fetch/navigation calls are routed through
+          // the proxy (avoiding cross-origin CORS failures).
           outHeaders['content-type'] = 'text/html; charset=utf-8';
           delete outHeaders['content-length'];
           res.writeHead(proxyRes.statusCode || 403, outHeaders);
-          res.end(rewriteChallengeHtml(text, url.toString()));
+          res.end(rewriteHtml(text, url.toString(), baseProxyUrl));
           return;
         }
 

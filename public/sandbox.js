@@ -248,19 +248,19 @@
   function _isChallengeUrl(absUrl) {
     try {
       var p = new URL(absUrl);
-      // Known challenge-service hostnames
+      // Known challenge-service hostnames (Turnstile iframe, hCaptcha, reCAPTCHA…)
+      // These must load from their real origin so postMessage origin checks pass.
       if (_isChallengeServiceHost(p.hostname)) return true;
-      var path = p.pathname.toLowerCase();
       var search = p.search.toLowerCase();
-      // CF challenge orchestration/validation scripts on ANY domain.
-      // When our proxy server fetches /cdn-cgi/challenge-platform/ CF sees a
-      // datacenter IP and returns another challenge → infinite loop.
-      if (path.indexOf('/cdn-cgi/challenge-platform/') !== -1) return true;
-      // Old IUAM token exchange — IP-locked
-      if (path.indexOf('/cdn-cgi/l/chk_jschl') !== -1) return true;
       // Post-challenge redirect token — IP-locked to user browser's IP.
       // Our server can't submit it; must go direct from browser.
       if (search.indexOf('__cf_chl_rt_tk=') !== -1) return true;
+      // NOTE: /cdn-cgi/challenge-platform/ and /cdn-cgi/l/chk_jschl are intentionally
+      // NOT treated as direct-passthrough URLs here.  They are routed through the proxy
+      // (/_midas/browse?url=…) so the browser avoids cross-origin CORS failures when
+      // submitting the challenge token.  isCaptchaUrl() in the server marks them as
+      // passthrough so no HTML rewriting occurs, and the proxy forwards the response
+      // (including the Location redirect) back through the proxy context.
     } catch (e) {}
     return false;
   }

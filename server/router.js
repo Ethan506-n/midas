@@ -305,6 +305,48 @@ function rewriteJsonLd(json, baseUrl) {
   } catch { return json; }
 }
 
+/**
+ * Minimal rewrite for Cloudflare challenge/CAPTCHA pages.
+ *
+ * Regular rewriteHtml breaks these pages because:
+ *  1. It strips <base> tags, so relative URLs like /cdn-cgi/challenge-platform/…
+ *     resolve against our proxy origin instead of the real target — the challenge
+ *     scripts can't phone home and CF shows "Unable to connect to the website".
+ *  2. rewriteJs() corrupts the heavily-obfuscated challenge code.
+ *
+ * This function instead:
+ *  - Strips SRI/nonce/CSP/x-frame-options so the page loads at all
+ *  - Injects <base href="https://real-origin/"> right after <head> so every
+ *    relative URL in challenge scripts resolves to the real origin
+ *  - Leaves all inline <script> content completely untouched
+ *  - Does NOT inject sandbox.js (challenge widget must run natively)
+ */
+function rewriteChallengeHtml(html, baseUrl) {
+  let origin = '';
+  try { origin = new URL(baseUrl).origin; } catch {}
+
+  // Strip things that prevent the page loading in our context
+  html = html.replace(/<base\b[^>]*>/gi, '');
+  html = html.replace(/\s+integrity\s*=\s*("([^"]*)"|'([^']*)')/gi, '');
+  html = html.replace(/\s+nonce\s*=\s*("([^"]*)"|'([^']*)')/gi, '');
+  html = html.replace(/\s+crossorigin\s*=\s*("([^"]*)"|'([^']*)')/gi, '');
+  html = html.replace(/\s+crossorigin(?=[\s>\/])/gi, '');
+  html = html.replace(/<meta\b[^>]*\bhttp-equiv\s*=\s*["']?content-security-policy["']?[^>]*>/gi, '');
+  html = html.replace(/<meta\b[^>]*\bhttp-equiv\s*=\s*["']?content-security-policy-report-only["']?[^>]*>/gi, '');
+
+  // Inject <base> pointing at the real origin so relative URLs work
+  if (origin) {
+    const baseTag = '<base href="' + origin + '/">';
+    if (/<head\b[^>]*>/i.test(html)) {
+      html = html.replace(/<head(\b[^>]*)>/i, (m) => m + baseTag);
+    } else {
+      html = baseTag + html;
+    }
+  }
+
+  return html;
+}
+
 function rewriteHtml(html, baseUrl, baseProxyUrl) {
   // Remove <base> tags (we handle base URL ourselves)
   html = html.replace(/<base\b[^>]*>/gi, '');
@@ -1442,20 +1484,21 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
               outHeaders['content-type'] = 'text/html; charset=utf-8';
               delete outHeaders['content-length'];
               res.writeHead(proxyRes.statusCode || 403, outHeaders);
-              res.end(rewriteHtml(text, url.toString(), baseProxyUrl));
+              res.end(rewriteChallengeHtml(text, url.toString()));
             }
             return;
           }
 
           // --- Turnstile / Managed challenge: serve to user ---
-          // The challenge widget runs in the user's browser.  All API calls to
-          // challenges.cloudflare.com go through sandbox.js → our proxy, so the
-          // resulting Set-Cookie: cf_clearance is captured by storeCookies() and
-          // stored in the session jar.  The user's next navigation will succeed.
+          // The challenge page must run natively in the user's browser — we use
+          // rewriteChallengeHtml() which injects <base href="real-origin/"> so
+          // relative /cdn-cgi/challenge-platform/ paths resolve to the real site,
+          // not our proxy.  We intentionally skip rewriteJs() and sandbox.js here
+          // so the obfuscated challenge code runs intact.
           outHeaders['content-type'] = 'text/html; charset=utf-8';
           delete outHeaders['content-length'];
           res.writeHead(proxyRes.statusCode || 403, outHeaders);
-          res.end(rewriteHtml(text, url.toString(), baseProxyUrl));
+          res.end(rewriteChallengeHtml(text, url.toString()));
           return;
         }
 

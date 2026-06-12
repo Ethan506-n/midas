@@ -300,6 +300,53 @@ function handler(req, res) {
     return;
   }
 
+  // ── Cloudflare post-challenge redirect ─────────────────────────────────────
+  // When challenge pages are served via rewriteChallengeHtml (no sandbox.js,
+  // clean JS environment), the challenge completes and CF does:
+  //   window.location = '/login?__cf_chl_rt_tk=TOKEN'
+  // Without sandbox.js to intercept it, the relative URL resolves against the
+  // proxy's origin, so the browser navigates here.  We 302-redirect directly to
+  // the real CF domain so the token is submitted from the user's real IP
+  // (CF validates __cf_chl_rt_tk against the same IP that solved the challenge).
+  if (url.searchParams.has('__cf_chl_rt_tk')) {
+    try {
+      let targetOrigin = '';
+
+      // Primary: extract target domain from the Referer URL's ?url= parameter
+      // (the browser was at /_midas/browse?url=https://dash.cloudflare.com/)
+      const referer = req.headers['referer'] || req.headers['referer'] || '';
+      if (referer) {
+        const refUrl = new URL(referer, `http://${req.headers.host || 'localhost'}`);
+        if (refUrl.searchParams.has('url')) {
+          targetOrigin = new URL(refUrl.searchParams.get('url')).origin;
+        }
+      }
+
+      // Fallback: check active session's stored target
+      if (!targetOrigin) {
+        const cookies = req.headers['cookie'] || '';
+        const sidMatch = cookies.match(/midas_sid=([^;]+)/);
+        if (sidMatch) {
+          const sid = sidMatch[1];
+          const sessionTarget = SESSION_TARGETS && SESSION_TARGETS.get(sid);
+          if (sessionTarget && sessionTarget.origin) {
+            targetOrigin = sessionTarget.origin;
+          }
+        }
+      }
+
+      if (targetOrigin) {
+        const dest = targetOrigin + url.pathname + url.search + url.hash;
+        console.log(`[CF-TOKEN] Redirecting __cf_chl_rt_tk to ${dest}`);
+        res.writeHead(302, { location: dest, 'cache-control': 'no-store' });
+        res.end();
+        return;
+      }
+    } catch (e) {
+      console.error('[CF-TOKEN] Failed to resolve redirect target:', e.message);
+    }
+  }
+
   router(req, res, url);
 }
 

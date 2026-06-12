@@ -131,6 +131,16 @@ function isChallengeServiceUrl(url) {
       if (h.endsWith('.' + d)) return true;
     }
 
+    // /cdn-cgi/challenge-platform/ paths on ANY domain.
+    // CF challenge orchestration scripts are gated on the requester's IP — a
+    // datacenter IP causes CF to return another challenge instead of the script,
+    // breaking the widget.  The browser loads them directly from the user's real
+    // IP so CF serves the actual orchestration/validation JavaScript.
+    if (p.includes('/cdn-cgi/challenge-platform/')) return true;
+
+    // /cdn-cgi/l/chk_jschl  — old IUAM token exchange (IP-locked)
+    if (p.includes('/cdn-cgi/l/chk_jschl')) return true;
+
     // __cf_chl_rt_tk  — post-challenge redirect token.  CF issues this after
     // the challenge is solved in the user's browser and ties it to the browser's
     // IP.  When our server forwards the request with this token, CF rejects it
@@ -1488,20 +1498,26 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
               outHeaders['content-type'] = 'text/html; charset=utf-8';
               delete outHeaders['content-length'];
               res.writeHead(proxyRes.statusCode || 403, outHeaders);
-              res.end(rewriteHtml(text, url.toString(), baseProxyUrl));
+              res.end(rewriteChallengeHtml(text, url.toString()));
             }
             return;
           }
 
           // --- Turnstile / Managed challenge: serve to user ---
-          // rewriteHtml() now skips rewriteJs() for challenge pages (preserving
-          // obfuscated challenge code) while still injecting sandbox.js so that
-          // /cdn-cgi/challenge-platform/ fetch/navigation calls are routed through
-          // the proxy (avoiding cross-origin CORS failures).
+          // Use rewriteChallengeHtml (base tag, no sandbox.js, no JS rewriting)
+          // so the heavily-obfuscated CF challenge scripts run in a clean native
+          // JS environment.  sandbox.js overrides (fetch, XHR, location…) would
+          // be detected by CF's fingerprinting, causing the challenge to abort
+          // before the widget renders.  The <base> tag makes all relative HTML
+          // attributes (script src, link href…) resolve to the real CF origin so
+          // resources load directly — no cross-origin restriction for <script> or
+          // <link> tags.  The server-side __cf_chl_rt_tk handler in index.js
+          // catches the post-challenge redirect and bounces the browser to CF so
+          // the token is submitted from the user's real IP.
           outHeaders['content-type'] = 'text/html; charset=utf-8';
           delete outHeaders['content-length'];
           res.writeHead(proxyRes.statusCode || 403, outHeaders);
-          res.end(rewriteHtml(text, url.toString(), baseProxyUrl));
+          res.end(rewriteChallengeHtml(text, url.toString()));
           return;
         }
 

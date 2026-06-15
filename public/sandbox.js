@@ -7,6 +7,33 @@
   if (window.__midas_hook) return;
   window.__midas_hook = true;
 
+  // ── Function.prototype.toString spoofing ──────────────────────────────────
+  // Fingerprinting scripts (DDG, Reddit, bot detectors) call fetch.toString()
+  // and XMLHttpRequest.prototype.open.toString() to detect proxy wrappers.
+  // We intercept Function.prototype.toString and return '[native code]' for
+  // any function we explicitly mark with _markNative() below.
+  var _nativeFnSet;
+  try { _nativeFnSet = new WeakSet(); } catch(e2) { _nativeFnSet = null; }
+  var _origToStr = Function.prototype.toString;
+  try {
+    var _spoofedToStr = function toString() {
+      if (_nativeFnSet && _nativeFnSet.has(this)) {
+        return 'function ' + (this.name || '') + '() { [native code] }';
+      }
+      return _origToStr.call(this);
+    };
+    Object.defineProperty(Function.prototype, 'toString', {
+      value: _spoofedToStr, writable: true, configurable: true,
+    });
+    if (_nativeFnSet) try { _nativeFnSet.add(_spoofedToStr); } catch(e2) {}
+  } catch(e2) {}
+  function _markNative(fn) {
+    if (_nativeFnSet && fn && typeof fn === 'function') {
+      try { _nativeFnSet.add(fn); } catch(e2) {}
+    }
+    return fn;
+  }
+
   // Global error handler for SPA issues
   var errorCount = 0;
   var origError = console.error;
@@ -807,6 +834,7 @@
     } catch (e) {}
     return _origFetch.call(window, input, init);
   };
+  _markNative(window.fetch);
 
   // ── XMLHttpRequest interception ───────────────────────────────────────────
 
@@ -821,6 +849,7 @@
       ? [method, url, async, user, password]
       : [method, url]);
   };
+  _markNative(XMLHttpRequest.prototype.open);
 
   // ── navigator.sendBeacon interception ─────────────────────────────────────
 
@@ -832,6 +861,7 @@
       } catch (e) {}
       return _origBeacon(url, data);
     };
+    _markNative(navigator.sendBeacon);
   }
 
   // ── WebSocket interception ────────────────────────────────────────────────
@@ -868,6 +898,7 @@
   MidasWebSocket._midasNative = true;
   try {
     window.WebSocket = MidasWebSocket;
+    _markNative(MidasWebSocket);
   } catch (e) {}
 
   // ── EventSource interception ──────────────────────────────────────────────
@@ -881,7 +912,7 @@
       return init !== undefined ? new _OrigEventSource(url, init) : new _OrigEventSource(url);
     }
     MidasEventSource.prototype = _OrigEventSource.prototype;
-    try { window.EventSource = MidasEventSource; } catch (e) {}
+    try { window.EventSource = MidasEventSource; _markNative(MidasEventSource); } catch (e) {}
   }
 
   // ── document.createElement interception ──────────────────────────────────
@@ -889,7 +920,7 @@
   // defense; this catches any remaining cases where src is set via setAttribute.
 
   var _origCreateElement = document.createElement.bind(document);
-  document.createElement = function (tag) {
+  document.createElement = _markNative(function createElement(tag) {
     var el = _origCreateElement(tag);
     var tagLower = (tag || '').toLowerCase();
     if (tagLower === 'script' || tagLower === 'link' || tagLower === 'img' || tagLower === 'iframe' || tagLower === 'video' || tagLower === 'audio') {
@@ -902,7 +933,7 @@
       };
     }
     return el;
-  };
+  });
 
   // ── Service Worker blocking ───────────────────────────────────────────────
   // Prevent sites from registering a SW at the proxy origin — it would intercept

@@ -305,27 +305,35 @@ function rewriteJsonLd(json, baseUrl) {
   } catch { return json; }
 }
 
-/**
- * Minimal rewrite for Cloudflare challenge/CAPTCHA pages.
- *
- * Regular rewriteHtml breaks these pages because:
- *  1. It strips <base> tags, so relative URLs like /cdn-cgi/challenge-platform/…
- *     resolve against our proxy origin instead of the real target — the challenge
- *     scripts can't phone home and CF shows "Unable to connect to the website".
- *  2. rewriteJs() corrupts the heavily-obfuscated challenge code.
- *
- * This function instead:
- *  - Strips SRI/nonce/CSP/x-frame-options so the page loads at all
- *  - Injects <base href="https://real-origin/"> right after <head> so every
- *    relative URL in challenge scripts resolves to the real origin
- *  - Leaves all inline <script> content completely untouched
- *  - Does NOT inject sandbox.js (challenge widget must run natively)
- */
+// rewriteChallengeHtml — thin alias; all challenge page logic lives in rewriteHtmlWithBase.
 function rewriteChallengeHtml(html, baseUrl) {
+  return rewriteHtmlWithBase(html, baseUrl);
+}
+
+// rewriteHtmlWithBase — used for CF challenge pages and relay-served Error-1000 pages.
+//
+// Key insight (same approach as UV/Scramjet):
+//   Our proxy server has a datacenter IP that Cloudflare blocks.  When we serve a
+//   page through rewriteHtml(), every subresource (CSS, JS, images) is fetched by
+//   the browser via our proxy server — which also gets blocked, causing white pages.
+//
+//   The fix: inject a <base href="real-origin/"> tag so HTML attribute URLs (src,
+//   href, action…) resolve to the REAL domain in the browser.  The browser then
+//   fetches those resources DIRECTLY from the target site using the USER's real IP,
+//   which CF does not block.  We do NOT server-side-rewrite attribute URLs here.
+//
+//   Injection ORDER inside <head> is critical:
+//     1. Anti-detection script  — inline, hides webdriver flag, adds window.chrome
+//     2. <script src="/sandbox.js">  — relative URL resolves against the page URL
+//        BEFORE the <base> tag is parsed, so the browser fetches it from OUR server.
+//        sandbox.js sets up fetch/navigation hooks with BASE_URL = real origin.
+//     3. <base href="real-origin/">  — only affects elements parsed AFTER this tag,
+//        so all original head/body resources load from the real domain directly.
+function rewriteHtmlWithBase(html, baseUrl) {
   let origin = '';
   try { origin = new URL(baseUrl).origin; } catch {}
 
-  // Strip things that prevent the page loading in our context
+  // Strip elements that would prevent the page loading in our context
   html = html.replace(/<base\b[^>]*>/gi, '');
   html = html.replace(/\s+integrity\s*=\s*("([^"]*)"|'([^']*)')/gi, '');
   html = html.replace(/\s+nonce\s*=\s*("([^"]*)"|'([^']*)')/gi, '');
@@ -334,14 +342,24 @@ function rewriteChallengeHtml(html, baseUrl) {
   html = html.replace(/<meta\b[^>]*\bhttp-equiv\s*=\s*["']?content-security-policy["']?[^>]*>/gi, '');
   html = html.replace(/<meta\b[^>]*\bhttp-equiv\s*=\s*["']?content-security-policy-report-only["']?[^>]*>/gi, '');
 
-  // Inject <base> pointing at the real origin so relative URLs work
-  if (origin) {
-    const baseTag = '<base href="' + origin + '/">';
-    if (/<head\b[^>]*>/i.test(html)) {
-      html = html.replace(/<head(\b[^>]*)>/i, (m) => m + baseTag);
-    } else {
-      html = baseTag + html;
-    }
+  if (!origin) return html;
+
+  const safeBase = baseUrl.replace(/"/g, '%22');
+  const antiDetect = '<script>' + injectAntiDetectionScript() + '</script>';
+  const sandboxScript = '<script src="/sandbox.js" data-base="' + safeBase + '"></script>';
+  const baseTag = '<base href="' + origin + '/">';
+  // ORDER: antidetect → sandbox.js (proxy-relative, must load before base tag is parsed)
+  //        → base tag (makes all subsequent HTML attr URLs point to the real domain)
+  const injection = antiDetect + sandboxScript + baseTag;
+
+  if (/<head\b[^>]*>/i.test(html)) {
+    html = html.replace(/<head(\b[^>]*)>/i, (m) => m + injection);
+  } else if (html.includes('</head>')) {
+    html = html.replace('</head>', injection + '</head>');
+  } else if (html.includes('</body>')) {
+    html = html.replace('</body>', injection + '</body>');
+  } else {
+    html = injection + html;
   }
 
   return html;
@@ -1441,7 +1459,11 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
             try {
               const relayed = await tryViaRelay(targetUrl);
               if (relayed) {
-                const rewritten = rewriteHtml(relayed.body, targetUrl, baseProxyUrl);
+                // Use rewriteHtmlWithBase (base tag + sandbox.js) instead of
+                // rewriteHtml so that sub-resources (CSS, JS, images) load
+                // directly from the real domain in the browser using the user's
+                // real IP — our datacenter proxy IP would be blocked by CF too.
+                const rewritten = rewriteHtmlWithBase(relayed.body, targetUrl);
                 outHeaders['content-type'] = 'text/html; charset=utf-8';
                 outHeaders['x-cf-bypass'] = relayed.source;
                 delete outHeaders['content-length'];

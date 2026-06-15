@@ -678,6 +678,26 @@ function rewriteJs(js, baseUrl) {
   // ES module static imports: import ... from "url"
   js = rewriteModuleImports(js, baseUrl);
 
+  // new URL("path", import.meta.url) — used by Vite/webpack for asset resolution.
+  // Rewrite to new URL("path", "https://real-origin/...") so URL resolution stays correct.
+  js = js.replace(/\bnew\s+URL\s*\(\s*("([^"]+)"|'([^']+)')\s*,\s*import\.meta\.url\s*\)/g, (m, _q, dq, sq) => {
+    const u = (dq ?? sq ?? '').trim();
+    if (!u) return m;
+    // Absolute URL: proxy it directly
+    if (/^https?:\/\//i.test(u)) {
+      const abs = resolveUrl(baseUrl, u);
+      if (!abs || isAlreadyProxied(abs)) return m;
+      return 'new URL("' + toProxyUrl(abs) + '", import.meta.url)';
+    }
+    // Relative path: resolve against baseUrl and proxy
+    if (u.startsWith('/') || u.startsWith('./') || u.startsWith('../')) {
+      const abs = resolveUrl(baseUrl, u);
+      if (!abs) return m;
+      return 'new URL("' + toProxyUrl(abs) + '", location.href)';
+    }
+    return m;
+  });
+
   // Rewrite webpack public path (r.p / __webpack_require__.p / __webpack_public_path__)
   // Fixes Next.js / webpack5 dynamic chunk loading where chunks use relative paths like /_next/
   // We use a non-encoded proxy prefix so webpack can safely append chunk filenames via string concat.
@@ -690,6 +710,42 @@ function rewriteJs(js, baseUrl) {
   });
 
   return js;
+}
+
+function buildError1000Page(hostname, targetUrl) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Site Blocked — ${hostname}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f0f13;color:#e2e2e9;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
+  .card{background:#1a1a24;border:1px solid #2e2e42;border-radius:16px;padding:40px;max-width:480px;width:100%;text-align:center}
+  .icon{font-size:48px;margin-bottom:20px}
+  h1{font-size:22px;font-weight:700;margin-bottom:10px;color:#f0f0f8}
+  p{font-size:15px;color:#9090a8;line-height:1.6;margin-bottom:16px}
+  .domain{display:inline-block;background:#0f0f18;border:1px solid #2e2e42;border-radius:8px;padding:6px 14px;font-family:monospace;font-size:14px;color:#a0a0c0;margin-bottom:24px}
+  .reason{background:#1e1020;border:1px solid #3a1e4a;border-radius:8px;padding:14px 18px;font-size:13px;color:#c090d8;line-height:1.5;text-align:left;margin-bottom:24px}
+  .reason strong{color:#e0a0f8}
+  .btn{display:inline-block;background:#6c4aff;color:#fff;border:none;border-radius:10px;padding:12px 28px;font-size:15px;font-weight:600;cursor:pointer;text-decoration:none}
+  .btn:hover{background:#7c5aff}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">🚫</div>
+  <h1>Cloudflare Blocked This Request</h1>
+  <div class="domain">${hostname}</div>
+  <p>This site is protected by Cloudflare and detected that the request is coming from a datacenter IP address, which it prohibits (Error 1000).</p>
+  <div class="reason">
+    <strong>Why this happens:</strong> Cloudflare's network identifies the proxy server's outbound IP as a datacenter address and blocks it to prevent routing loops. This is a Cloudflare policy decision — not something that can be resolved by retrying.
+  </div>
+  <a class="btn" href="javascript:history.back()">← Go Back</a>
+</div>
+</body>
+</html>`;
 }
 
 function parseCookieHeader(str) {
@@ -1293,22 +1349,16 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
         // Check for Cloudflare challenges with site-specific retry limits
         const maxRetries = getMaxRetries(url.hostname);
 
-        // Error 1000 ("DNS points to prohibited IP") is a hard block from Cloudflare's
-        // edge because the server IP is flagged as a datacenter.  It is NOT a JS challenge
-        // and cannot be solved by adding headers — but retrying with the cleanest possible
-        // browser headers (no proxy artifacts, fresh UA) gives the best chance of a
-        // different edge node or path accepting the request.
+        // Error 1000 ("DNS points to prohibited IP") is a permanent block from Cloudflare's
+        // edge because our server's datacenter IP conflicts with their routing.  Retrying
+        // with different headers will NOT help — the block is IP-based, not header-based.
+        // Show a clear friendly error page so the user knows what happened.
         if (isHtml && isCloudflareError1000(text)) {
-          if (depth < 2) {
-            console.log(`[CF] Error 1000 on ${url.hostname} (attempt ${depth + 1}/2) — retrying with clean browser headers`);
-            browseHandler(req, res, targetUrl, depth + 1);
-          } else {
-            console.log(`[CF] Error 1000 on ${url.hostname} — all retries exhausted, passing through error page`);
-            outHeaders['content-type'] = 'text/html; charset=utf-8';
-            delete outHeaders['content-length'];
-            res.writeHead(proxyRes.statusCode, outHeaders);
-            res.end(rewriteHtml(text, url.toString(), baseProxyUrl));
-          }
+          console.log(`[CF] Error 1000 on ${url.hostname} — Cloudflare blocked datacenter IP`);
+          outHeaders['content-type'] = 'text/html; charset=utf-8';
+          delete outHeaders['content-length'];
+          res.writeHead(403, outHeaders);
+          res.end(buildError1000Page(url.hostname, targetUrl));
           return;
         }
 
@@ -1570,6 +1620,17 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
         res.end(out);
       });
     } else {
+      // SSE (text/event-stream): disable socket timeout so the stream stays open
+      // indefinitely and add the headers browsers expect for a live event stream.
+      const isSse = ct.includes('text/event-stream');
+      if (isSse) {
+        outHeaders['cache-control'] = 'no-cache';
+        outHeaders['connection'] = 'keep-alive';
+        outHeaders['x-accel-buffering'] = 'no';
+        try { res.socket && res.socket.setTimeout(0); } catch (_) {}
+        try { proxyRes.socket && proxyRes.socket.setTimeout(0); } catch (_) {}
+      }
+
       res.writeHead(proxyRes.statusCode, outHeaders);
       // Diagnostic: log socket.io / firebase WS-poll responses so we can see
       // what event data is actually being delivered to the browser.
@@ -1604,6 +1665,7 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
 
   // Socket.io long-polling holds connections open for up to the server's
   // pingInterval (default 25 s). Give it 65 s so we never kill a live poll.
+  // SSE connections handle their own socket timeout inside the proxyRes callback.
   const isSocketIoPath = url.pathname.startsWith('/socket.io/') ||
     url.pathname.startsWith('/ws') || url.pathname.startsWith('/.ws');
   proxyReq.setTimeout(isSocketIoPath ? 65000 : 30000, () => {

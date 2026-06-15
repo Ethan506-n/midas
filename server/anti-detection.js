@@ -145,6 +145,35 @@ export function injectAntiDetectionScript() {
       });
     };
   }
+
+  // Canvas fingerprint noise — adds imperceptible per-session pixel jitter so
+  // the canvas hash differs from a headless/proxy signature. DDG and other
+  // fingerprinters hash canvas output to identify automated sessions.
+  try{
+    var _noise=(Math.random()*0.04)-0.02;
+    var _origToDataURL=HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL=function(){
+      var ctx=this.getContext&&this.getContext('2d');
+      if(ctx&&this.width>0&&this.height>0){
+        try{
+          var id=ctx.getImageData(0,0,this.width,this.height);
+          for(var i=0;i<id.data.length;i+=4){
+            id.data[i]  =Math.min(255,Math.max(0,id.data[i]  +Math.round(_noise*32)));
+            id.data[i+1]=Math.min(255,Math.max(0,id.data[i+1]+Math.round(_noise*28)));
+            id.data[i+2]=Math.min(255,Math.max(0,id.data[i+2]+Math.round(_noise*24)));
+          }
+          ctx.putImageData(id,0,0);
+        }catch(e2){}
+      }
+      return _origToDataURL.apply(this,arguments);
+    };
+  }catch(e){}
+
+  // Hardware/screen fingerprint — match typical laptop values
+  try{Object.defineProperty(navigator,'hardwareConcurrency',{get:function(){return 8;},configurable:true});}catch(e){}
+  try{Object.defineProperty(navigator,'deviceMemory',{get:function(){return 8;},configurable:true});}catch(e){}
+  try{Object.defineProperty(navigator,'maxTouchPoints',{get:function(){return 0;},configurable:true});}catch(e){}
+  try{Object.defineProperty(navigator,'cookieEnabled',{get:function(){return true;},configurable:true});}catch(e){}
 })();`;
 }
 

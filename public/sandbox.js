@@ -596,7 +596,7 @@
     return toProxy(url);
   }
 
-  history.pushState = function (state, title, url) {
+  history.pushState = _markNative(function pushState(state, title, url) {
     if (url !== undefined && url !== null) url = _handleSpaNav(url);
     var nav = _pendingNavUrl;
     _pendingNavUrl = null;
@@ -607,8 +607,8 @@
         else { location.assign(nav); }
       } catch(e2) {}
     }
-  };
-  history.replaceState = function (state, title, url) {
+  });
+  history.replaceState = _markNative(function replaceState(state, title, url) {
     if (url !== undefined && url !== null) url = _handleSpaNav(url);
     var nav = _pendingNavUrl;
     _pendingNavUrl = null;
@@ -619,7 +619,7 @@
         else { location.assign(nav); }
       } catch(e2) {}
     }
-  };
+  });
 
   // Re-sync BASE_URL when the user navigates back/forward through SPA history.
   window.addEventListener('popstate', function () {

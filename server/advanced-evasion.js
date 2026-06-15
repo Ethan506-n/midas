@@ -2,46 +2,15 @@
  * Advanced IP and proxy spoofing to evade detection
  */
 
-import { createProxyChain } from './ip-provider.js';
+import { createProxyChain, buildResidentialIpHeaders } from './ip-provider.js';
 
-// Common proxy headers that real proxies use
-const PROXY_HEADERS = [
-  'x-forwarded-for',
-  'x-forwarded-proto',
-  'x-forwarded-host',
-  'x-real-ip',
-  'cf-connecting-ip',
-  'client-ip',
-  'x-client-ip',
-  'x-forwarded-by',
-  'x-forwarded-server',
-  'x-forwarded-for-original',
-];
+export { buildResidentialIpHeaders };
 
 /**
- * Generate realistic proxy/forwarding headers
- * Uses unique, unblocked IP ranges from ip-provider
+ * Generate realistic proxy/forwarding headers (legacy compat)
  */
 export function generateProxyHeaders() {
-  // Use unique IP chain from ip-provider
-  const proxyChain = createProxyChain(3);
-  
-  // Get the primary IP and proxy IPs
-  const clientIp = proxyChain.primary;
-  const proxyIps = proxyChain.ips;
-
-  return {
-    'x-forwarded-for': proxyChain.chain,
-    'x-forwarded-proto': 'https',
-    'x-forwarded-host': 'proxy.relay.com',
-    'x-real-ip': clientIp,
-    'cf-connecting-ip': clientIp,
-    'client-ip': clientIp,
-    'x-originating-ip': `[${proxyIps[proxyIps.length - 1]}]`,
-    'x-forwarded-by': `proxy-gateway-${Math.floor(Math.random() * 10)}`,
-    'x-forwarded-server': `proxy-server-${Math.floor(Math.random() * 10)}`,
-    'via': `1.1 proxy-relay:8080 (HTTP/1.1 GWA), 1.1 edge-cache:${3128 + Math.floor(Math.random() * 100)}`,
-  };
+  return buildResidentialIpHeaders();
 }
 
 /**

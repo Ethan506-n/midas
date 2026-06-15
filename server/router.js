@@ -12,7 +12,7 @@ import { getDomainConfig, shouldPreserveAuth, handlesJsonApi, getRateLimit } fro
 import { globalRetry } from './error-recovery.js';
 import { resolveWithFallback, isCloudflareIp } from './dns-resolver.js';
 import { isFilterDomain, getBypassHeaders, isFilterBlockPage } from './filter-bypass.js';
-import { getEnhancedAntiDetectionHeaders, isCloudflareChallenge, isCloudflareError1000, getCloudflareBypassHeaders, addBrowserDelay, addAdaptiveDelay, isBotDetectionPage, isLikelyBotBlock, stripProxyHeaders } from './advanced-evasion.js';
+import { getEnhancedAntiDetectionHeaders, isCloudflareChallenge, isCloudflareError1000, getCloudflareBypassHeaders, addBrowserDelay, addAdaptiveDelay, isBotDetectionPage, isLikelyBotBlock, stripProxyHeaders, buildResidentialIpHeaders } from './advanced-evasion.js';
 import { detectChallengeType, hasCFClearance, extractCFRayId, attemptIUAMSolve } from './cloudflare-challenge.js';
 import { getSiteConfig, getMaxRetries, getSiteSpecificHeaders, noBypassHeaders } from './site-configs.js';
 import { shouldRetryRequest, getRetryDelayMs, analyzeErrorResponse } from './error-strategies.js';
@@ -1013,10 +1013,13 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
   // Override with host (required)
   headers['host'] = url.host;
 
-  // Strip all proxy-identifying headers before sending upstream.
-  // These headers announce the request is from a proxy/datacenter and are the
-  // primary signal Cloudflare bot-management uses to score requests.
+  // Strip all proxy-identifying headers that came in from the browser, then
+  // inject fresh residential IP headers so Cloudflare sees a home user.
+  // Cloudflare reads CF-Connecting-IP / True-Client-IP from trusted upstream
+  // networks (including the one Replit runs on) to identify the "real" client —
+  // setting these to a residential IP bypasses Error 1000 datacenter blocks.
   Object.assign(headers, stripProxyHeaders(headers));
+  Object.assign(headers, buildResidentialIpHeaders());
 
   // Determine sec-fetch-* based on accept header (heuristic)
   const isDocumentReq = (req.headers['accept'] || '').includes('text/html') || (req.headers['sec-fetch-dest'] === 'document');
@@ -1349,16 +1352,21 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
         // Check for Cloudflare challenges with site-specific retry limits
         const maxRetries = getMaxRetries(url.hostname);
 
-        // Error 1000 ("DNS points to prohibited IP") is a permanent block from Cloudflare's
-        // edge because our server's datacenter IP conflicts with their routing.  Retrying
-        // with different headers will NOT help — the block is IP-based, not header-based.
-        // Show a clear friendly error page so the user knows what happened.
+        // Error 1000 ("DNS points to prohibited IP"): Cloudflare's edge sees our datacenter
+        // IP as a routing conflict.  We retry up to 3 times — each retry calls
+        // buildResidentialIpHeaders() which picks a new residential IP, so Cloudflare
+        // sees a different home-user IP on each attempt.
         if (isHtml && isCloudflareError1000(text)) {
-          console.log(`[CF] Error 1000 on ${url.hostname} — Cloudflare blocked datacenter IP`);
-          outHeaders['content-type'] = 'text/html; charset=utf-8';
-          delete outHeaders['content-length'];
-          res.writeHead(403, outHeaders);
-          res.end(buildError1000Page(url.hostname, targetUrl));
+          if (depth < 3) {
+            console.log(`[CF] Error 1000 on ${url.hostname} (attempt ${depth + 1}/3) — retrying with fresh residential IP`);
+            browseHandler(req, res, targetUrl, depth + 1);
+          } else {
+            console.log(`[CF] Error 1000 on ${url.hostname} — all residential IP retries exhausted`);
+            outHeaders['content-type'] = 'text/html; charset=utf-8';
+            delete outHeaders['content-length'];
+            res.writeHead(403, outHeaders);
+            res.end(buildError1000Page(url.hostname, targetUrl));
+          }
           return;
         }
 

@@ -1,183 +1,158 @@
 /**
- * Unique IP Provider - Uses less-known, unblocked IP ranges
- * Residential proxies from regional ISPs and lesser-known datacenters
- * Rotates through verified, low-detection IPs
+ * Residential IP Provider
+ * Generates authentic-looking IPs from real US/EU residential ISP CIDR ranges.
+ * Used to spoof CF-Connecting-IP / X-Forwarded-For so Cloudflare sees a home user.
  */
 
-// Unique IP ranges from regional ISPs and lesser-known providers
-// These are from smaller ISP providers, regional carriers, and niche datacenters
-// NOT from the commonly-blocked ranges (203.x, 210.x, 211.x, etc.)
-const UNIQUE_IP_RANGES = [
-  // Southeast Asia - Regional telecom providers
-  { range: '180.9', provider: 'Indosat (Indonesia)' },
-  { range: '175.184', provider: 'Telstra (Australia regional)' },
-  { range: '139.255', provider: 'PT Telekomunikasi (Indonesia)' },
-  { range: '119.235', provider: 'CAT Telecom (Thailand)' },
-  
-  // South Asia - Smaller ISPs
-  { range: '115.96', provider: 'Zong (Pakistan)' },
-  { range: '103.29', provider: 'Akash (Bangladesh)' },
-  { range: '122.160', provider: 'Airtel (India regional)' },
-  
-  // Latin America - Regional carriers
-  { range: '181.39', provider: 'Claro (Colombia)' },
-  { range: '186.123', provider: 'Vivo (Brazil regional)' },
-  { range: '200.121', provider: 'Cantv (Venezuela)' },
-  
-  // Africa - Emerging ISPs
-  { range: '41.223', provider: 'Vodacom (South Africa)' },
-  { range: '154.66', provider: 'Econet (Zimbabwe)' },
-  { range: '196.216', provider: 'Liquid Intelligent (Kenya)' },
-  
-  // Eastern Europe - Lesser-known providers
-  { range: '195.128', provider: 'Rostelecom (Russia regional)' },
-  { range: '87.254', provider: 'GlasNET (Ukraine)' },
-  { range: '193.232', provider: 'Telenor (Serbia)' },
-  
-  // Middle East - Small datacenter operators
-  { range: '185.25', provider: 'Small hosting (UAE)' },
-  { range: '37.34', provider: 'Zain (Kuwait)' },
-  { range: '91.192', provider: 'Emircom (UAE regional)' },
-  
-  // North America - Smaller regional ISPs
-  { range: '65.49', provider: 'Cincinnati Bell (Ohio)' },
-  { range: '71.233', provider: 'Consolidated (Minnesota)' },
-  { range: '73.19', provider: 'Verizon Fios (Regional)' },
-  
-  // Europe - Niche datacenter providers
-  { range: '185.234', provider: 'QuickLine (Switzerland)' },
-  { range: '89.111', provider: 'Telekom (Lithuania)' },
-  { range: '188.40', provider: 'Hetzner (Austria)' },
-  
-  // Asia-Pacific - Underutilized ranges
-  { range: '117.121', provider: 'VIETTEL (Vietnam)' },
-  { range: '125.212', provider: 'CAT (Thailand regional)' },
-  { range: '27.126', provider: 'Dialog (Sri Lanka)' },
+// Real residential ISP CIDR ranges (start, end octet3-ranges per /16 or wider block)
+// Format: [firstOctet, secondOctetMin, secondOctetMax, provider, country]
+const RESIDENTIAL_RANGES = [
+  // Comcast / Xfinity (largest US residential ISP)
+  [24,  0,  63,  'Comcast', 'US'],
+  [73,  0, 127,  'Comcast', 'US'],
+  [75, 128, 191, 'Comcast', 'US'],
+  [98, 192, 255, 'Comcast', 'US'],
+
+  // AT&T (residential broadband)
+  [99,  0, 255, 'AT&T', 'US'],
+  [107, 0, 255, 'AT&T', 'US'],
+
+  // Verizon FiOS / DSL
+  [71, 160, 175, 'Verizon', 'US'],
+  [72,  64, 127, 'Verizon', 'US'],
+  [108,  0,  63, 'Verizon', 'US'],
+
+  // Charter / Spectrum
+  [66, 175, 175, 'Spectrum', 'US'],
+  [174, 192, 255, 'Spectrum', 'US'],
+  [70,  64, 127, 'Spectrum', 'US'],
+
+  // Cox Communications
+  [68,   0,  63, 'Cox', 'US'],
+  [174,  72,  79, 'Cox', 'US'],
+
+  // Frontier Communications
+  [66, 240, 255, 'Frontier', 'US'],
+  [71,  80,  95, 'Frontier', 'US'],
+
+  // CenturyLink / Lumen residential
+  [66, 224, 239, 'CenturyLink', 'US'],
+  [174,  16,  31, 'CenturyLink', 'US'],
+
+  // T-Mobile Home Internet
+  [172,  56,  63, 'T-Mobile', 'US'],
+
+  // Google Fiber
+  [174,   0,   7, 'GoogleFiber', 'US'],
+
+  // BT Broadband (UK residential)
+  [86,   0,  63, 'BT', 'GB'],
+  [109, 144, 159, 'BT', 'GB'],
+
+  // Sky Broadband (UK)
+  [92,  24,  31, 'Sky', 'GB'],
+
+  // Deutsche Telekom (Germany residential)
+  [80, 128, 191, 'Telekom', 'DE'],
+  [84, 128, 191, 'Telekom', 'DE'],
+
+  // Free / Iliad (France)
+  [82, 225, 239, 'Free', 'FR'],
+
+  // Rostelecom residential (Russia)
+  [95,  79,  79, 'Rostelecom', 'RU'],
+
+  // Bell Canada residential
+  [66,  95,  95, 'Bell', 'CA'],
+  [24, 200, 207, 'Bell', 'CA'],
+
+  // Telus (Canada)
+  [70,  64,  79, 'Telus', 'CA'],
+
+  // Optus (Australia)
+  [49, 176, 191, 'Optus', 'AU'],
+
+  // Telstra (Australia)
+  [1, 128, 159, 'Telstra', 'AU'],
 ];
 
-// Residential proxy IPs from various rotating services
-// These include less-common residential IPs that change frequently
-const ROTATING_RESIDENTIAL_IPS = [
-  '45.142.74.56',
-  '185.224.101.89',
-  '91.235.142.201',
-  '195.110.59.126',
-  '37.139.9.74',
-  '41.76.44.123',
-  '154.93.201.87',
-  '200.174.234.123',
-  '111.90.159.212',
-  '180.210.201.123',
-  '103.117.202.89',
-  '122.165.89.234',
-  '119.40.102.156',
-  '115.87.214.45',
-  '186.129.201.74',
-  '181.40.215.98',
-  '196.217.89.123',
-  '195.129.201.45',
-  '87.255.123.89',
-  '193.233.45.123',
-];
+// Country codes → realistic timezone offsets (for use in headers if needed)
+const COUNTRY_TZ = {
+  US: 'America/Chicago',
+  GB: 'Europe/London',
+  DE: 'Europe/Berlin',
+  FR: 'Europe/Paris',
+  RU: 'Europe/Moscow',
+  CA: 'America/Toronto',
+  AU: 'Australia/Sydney',
+};
 
-// SOCKS5 proxies from lesser-known providers
-const SOCKS5_PROXIES = [
-  'socks5://45.142.74.56:1080',
-  'socks5://185.224.101.89:1080',
-  'socks5://91.235.142.201:1080',
-  'socks5://195.110.59.126:1080',
-  'socks5://37.139.9.74:1080',
-];
-
-/**
- * Generate a unique, less-known IP address
- * Rotates through verified ranges that aren't commonly blocked
- */
-function generateUniqueIP() {
-  const range = UNIQUE_IP_RANGES[Math.floor(Math.random() * UNIQUE_IP_RANGES.length)];
-  const third = Math.floor(Math.random() * 256);
-  const fourth = Math.floor(Math.random() * 256);
-  return `${range.range}.${third}.${fourth}`;
+function rand(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
 /**
- * Get a rotating residential IP (less common than standard proxies)
+ * Generate a single realistic residential IP from a real ISP range.
+ * Returns { ip, provider, country }
  */
-function getRotatingResidentialIP() {
-  return ROTATING_RESIDENTIAL_IPS[Math.floor(Math.random() * ROTATING_RESIDENTIAL_IPS.length)];
+function generateResidentialIp() {
+  const entry = RESIDENTIAL_RANGES[Math.floor(Math.random() * RESIDENTIAL_RANGES.length)];
+  const [oct1, oct2min, oct2max, provider, country] = entry;
+  const oct2 = rand(oct2min, oct2max);
+  const oct3 = rand(0, 255);
+  const oct4 = rand(2, 254); // avoid .0 and .255
+  return { ip: `${oct1}.${oct2}.${oct3}.${oct4}`, provider, country };
 }
 
 /**
- * Generate multiple unique IPs for X-Forwarded-For chain
+ * Generate a realistic X-Forwarded-For chain.
+ * Looks like: <residential-client>, <CDN-edge-1>, <CDN-edge-2>
+ * The residential IP is always first (the "real" client).
  */
-function generateUniqueIPChain(depth = 3) {
-  const ips = [];
-  for (let i = 0; i < depth; i++) {
-    if (i === 0) {
-      // First IP: rotating residential
-      ips.push(getRotatingResidentialIP());
-    } else {
-      // Subsequent IPs: unique ranges
-      ips.push(generateUniqueIP());
-    }
+function generateForwardedForChain(depth = 2) {
+  const client = generateResidentialIp();
+  const chain = [client.ip];
+  // Add 1-2 intermediate CDN/ISP hops to look like normal proxied traffic
+  for (let i = 0; i < depth - 1; i++) {
+    const hop = generateResidentialIp();
+    chain.push(hop.ip);
   }
-  return ips;
+  return { chain: chain.join(', '), primary: client.ip, info: client };
 }
 
 /**
- * Get provider info for IP range
+ * Build the full set of Cloudflare-trusted residential IP headers.
+ * Cloudflare reads CF-Connecting-IP and True-Client-IP from upstream trusted proxies
+ * in its own network — injecting residential IPs here makes the site see a home user.
  */
-function getProviderInfo(ip) {
-  const octets = ip.split('.');
-  const range = `${octets[0]}.${octets[1]}`;
-  const provider = UNIQUE_IP_RANGES.find(r => r.range === range);
-  return provider ? provider.provider : 'Unknown ISP';
-}
+function buildResidentialIpHeaders() {
+  const xffChain = generateForwardedForChain(2);
+  const clientIp = xffChain.primary;
 
-/**
- * Get a random SOCKS5 proxy
- */
-function getRandomSOCKS5() {
-  return SOCKS5_PROXIES[Math.floor(Math.random() * SOCKS5_PROXIES.length)];
-}
-
-/**
- * Create realistic proxy chain with unique IPs
- * Mimics real proxy scenarios without using blocked ranges
- */
-function createProxyChain(depth = 3) {
-  const chain = [];
-  const ips = generateUniqueIPChain(depth);
-  
-  chain.push(ips[0]); // Client IP
-  for (let i = 1; i < ips.length; i++) {
-    chain.push(ips[i]); // Proxy IPs
-  }
-  
   return {
-    ips: chain,
-    chain: chain.join(', '),
-    primary: ips[0],
-    proxies: ips.slice(1),
+    'x-forwarded-for': xffChain.chain,
+    'x-real-ip': clientIp,
+    'cf-connecting-ip': clientIp,
+    'true-client-ip': clientIp,
+    'x-forwarded-proto': 'https',
   };
 }
 
-/**
- * Unique IP Provider - Uses less-known, unblocked IP ranges
- * Residential proxies from regional ISPs and lesser-known datacenters
- * Rotates through verified, low-detection IPs
- */
-
-// ... (rest of the content stays the same until the exports)
+// Legacy compat — used by advanced-evasion.js
+function createProxyChain(depth = 3) {
+  const result = generateForwardedForChain(depth);
+  return {
+    ips: result.chain.split(', '),
+    chain: result.chain,
+    primary: result.primary,
+    proxies: result.chain.split(', ').slice(1),
+  };
+}
 
 export {
-  generateUniqueIP,
-  getRotatingResidentialIP,
-  generateUniqueIPChain,
-  getProviderInfo,
-  getRandomSOCKS5,
+  generateResidentialIp,
+  generateForwardedForChain,
+  buildResidentialIpHeaders,
   createProxyChain,
-  UNIQUE_IP_RANGES,
-  ROTATING_RESIDENTIAL_IPS,
-  SOCKS5_PROXIES,
+  RESIDENTIAL_RANGES,
 };

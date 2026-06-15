@@ -125,10 +125,9 @@ function generateForwardedForChain(depth = 2) {
  * Cloudflare reads CF-Connecting-IP and True-Client-IP from upstream trusted proxies
  * in its own network — injecting residential IPs here makes the site see a home user.
  */
-function buildResidentialIpHeaders() {
+function _generateResidentialIpHeaders() {
   const xffChain = generateForwardedForChain(2);
   const clientIp = xffChain.primary;
-
   return {
     'x-forwarded-for': xffChain.chain,
     'x-real-ip': clientIp,
@@ -136,6 +135,32 @@ function buildResidentialIpHeaders() {
     'true-client-ip': clientIp,
     'x-forwarded-proto': 'https',
   };
+}
+
+// Per-session IP cache — each session reuses the same residential IP for consistency.
+// Bot scoring systems flag sessions that change IPs mid-session; stable IPs look human.
+const SESSION_IP_CACHE = new Map();
+const SESSION_IP_TTL = 30 * 60 * 1000; // 30 minutes
+
+// Purge expired sessions every 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [sid, entry] of SESSION_IP_CACHE) {
+    if (entry.expires < now) SESSION_IP_CACHE.delete(sid);
+  }
+}, 10 * 60 * 1000);
+
+/**
+ * Return residential IP headers for this session.
+ * If sid is provided the same IP is reused for the lifetime of the session.
+ */
+function buildResidentialIpHeaders(sid = null) {
+  if (!sid) return _generateResidentialIpHeaders();
+  const cached = SESSION_IP_CACHE.get(sid);
+  if (cached && cached.expires > Date.now()) return cached.headers;
+  const headers = _generateResidentialIpHeaders();
+  SESSION_IP_CACHE.set(sid, { headers, expires: Date.now() + SESSION_IP_TTL });
+  return headers;
 }
 
 // Legacy compat — used by advanced-evasion.js

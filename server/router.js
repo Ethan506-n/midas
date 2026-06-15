@@ -12,7 +12,7 @@ import { getDomainConfig, shouldPreserveAuth, handlesJsonApi, getRateLimit } fro
 import { globalRetry } from './error-recovery.js';
 import { resolveWithFallback, isCloudflareIp } from './dns-resolver.js';
 import { isFilterDomain, getBypassHeaders, isFilterBlockPage } from './filter-bypass.js';
-import { getEnhancedAntiDetectionHeaders, isCloudflareChallenge, isCloudflareError1000, getCloudflareBypassHeaders, addBrowserDelay, addAdaptiveDelay, isBotDetectionPage, isLikelyBotBlock, stripProxyHeaders, buildResidentialIpHeaders } from './advanced-evasion.js';
+import { getEnhancedAntiDetectionHeaders, isCloudflareChallenge, isCloudflareError1000, getCloudflareBypassHeaders, addBrowserDelay, addAdaptiveDelay, isBotDetectionPage, isLikelyBotBlock, stripProxyHeaders, buildResidentialIpHeaders, orderHeadersLikeChrome } from './advanced-evasion.js';
 import { detectChallengeType, hasCFClearance, extractCFRayId, attemptIUAMSolve } from './cloudflare-challenge.js';
 import { getSiteConfig, getMaxRetries, getSiteSpecificHeaders, noBypassHeaders } from './site-configs.js';
 import { shouldRetryRequest, getRetryDelayMs, analyzeErrorResponse } from './error-strategies.js';
@@ -1014,12 +1014,12 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
   headers['host'] = url.host;
 
   // Strip all proxy-identifying headers that came in from the browser, then
-  // inject fresh residential IP headers so Cloudflare sees a home user.
-  // Cloudflare reads CF-Connecting-IP / True-Client-IP from trusted upstream
-  // networks (including the one Replit runs on) to identify the "real" client —
-  // setting these to a residential IP bypasses Error 1000 datacenter blocks.
+  // inject residential IP headers for this session.  Using the same IP across
+  // all requests in a session is critical — Cloudflare Bot Management and other
+  // scorers flag sessions that change IPs mid-session as non-human.
+  const _reqSid = parseCookieHeader(req.headers.cookie).midas_sid || null;
   Object.assign(headers, stripProxyHeaders(headers));
-  Object.assign(headers, buildResidentialIpHeaders());
+  Object.assign(headers, buildResidentialIpHeaders(_reqSid));
 
   // Determine sec-fetch-* based on accept header (heuristic)
   const isDocumentReq = (req.headers['accept'] || '').includes('text/html') || (req.headers['sec-fetch-dest'] === 'document');
@@ -1113,6 +1113,11 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
     Object.assign(headers, buildPassthroughHeaders(req.headers, targetUrl));
   }
 
+  // Reorder headers to match Chrome 136's exact wire order.
+  // Cloudflare Bot Management fingerprints HTTP/1.1 header order — if headers
+  // arrive in a non-browser order the request is flagged as automated traffic.
+  const orderedHeaders = orderHeadersLikeChrome(headers, isDocumentReq);
+
   // Use pooled agent for connection reuse and rate limiting
   const pooledAgent = getAgent(url.hostname, isHttps);
   
@@ -1146,7 +1151,7 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
     port: url.port || (isHttps ? 443 : 80),
     path: url.pathname + url.search,
     method: req.method,
-    headers,
+    headers: orderedHeaders,
     rejectUnauthorized: false,
     agent: pooledAgent,
     ...(isHttps && usingIp ? { servername: url.hostname } : {}),

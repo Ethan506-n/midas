@@ -741,27 +741,67 @@
   } catch (e) {}
 
   // ── fetch() interception ──────────────────────────────────────────────────
+  // Mirrors what Scramjet/Ultraviolet do:
+  //  • Rewrite the URL of any external request through the proxy
+  //  • Rebuild Request objects so the proxied URL is used
+  //  • Strip 'no-cors' mode → 'cors' (our proxy always returns CORS headers)
+  //  • Strip credentials:'include' → 'omit' (server-side cookie jar handles auth)
+  //  • Skip blob: and data: URLs — they are local and must not be proxied
 
   var _origFetch = window.fetch;
   window.fetch = function (input, init) {
     try {
-      var url;
-      if (typeof input === 'string') {
-        url = input;
-      } else if (input && typeof input === 'object' && input.url) {
-        url = input.url;
+      var url, isRequest = false;
+      if (input instanceof Request) {
+        url = input.url; isRequest = true;
       } else if (input instanceof URL) {
         url = input.href;
+      } else if (typeof input === 'string') {
+        url = input;
       }
+
+      // Never proxy blob: or data: — they are local object URLs
+      if (url && /^(blob:|data:)/i.test(url)) {
+        return _origFetch.call(window, input, init);
+      }
+
       if (url && shouldProxy(url)) {
         var proxied = toProxy(url);
-        if (typeof input === 'string') {
-          input = proxied;
-        } else if (input instanceof Request) {
-          input = new Request(proxied, input);
-        } else if (input && typeof input.url !== 'undefined') {
-          input = proxied;
+
+        // Sanitise init options so they work from the proxy origin
+        var safeInit = {};
+        if (init) {
+          for (var k in init) {
+            if (Object.prototype.hasOwnProperty.call(init, k)) safeInit[k] = init[k];
+          }
         }
+        // 'no-cors' prevents reading the response — switch to 'cors' since
+        // our proxy always responds with Access-Control-Allow-Origin: *
+        if (safeInit.mode === 'no-cors') safeInit.mode = 'cors';
+        // 'include' sends browser cookies to the proxy origin, which is wrong;
+        // the server-side jar already attaches the right cookies upstream
+        if (safeInit.credentials === 'include') safeInit.credentials = 'same-origin';
+
+        if (isRequest) {
+          // Rebuild the Request with the proxied URL, preserving method/body/headers
+          try {
+            var reqInit = {
+              method: input.method,
+              headers: input.headers,
+              body: ['GET','HEAD'].indexOf(input.method) === -1 ? input.body : undefined,
+              mode: safeInit.mode || (input.mode === 'no-cors' ? 'cors' : input.mode),
+              credentials: safeInit.credentials || (input.credentials === 'include' ? 'same-origin' : input.credentials),
+              cache: input.cache,
+              redirect: input.redirect,
+              referrer: input.referrer,
+              integrity: input.integrity,
+            };
+            return _origFetch.call(window, new Request(proxied, reqInit), safeInit.signal !== undefined ? { signal: safeInit.signal } : undefined);
+          } catch (re) {
+            return _origFetch.call(window, proxied, safeInit);
+          }
+        }
+        return _origFetch.call(window, proxied, safeInit);
       }
     } catch (e) {}
     return _origFetch.call(window, input, init);

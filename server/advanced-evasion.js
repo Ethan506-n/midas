@@ -6,6 +6,83 @@ import { createProxyChain, buildResidentialIpHeaders } from './ip-provider.js';
 
 export { buildResidentialIpHeaders };
 
+// ─── Chrome 136 header ordering ────────────────────────────────────────────
+// Cloudflare Bot Management fingerprints the ORDER headers arrive in over
+// HTTP/1.1. Chrome 136 always emits them in the lists below. We rebuild the
+// headers object in exactly that order so our requests are indistinguishable
+// from a real desktop browser at the wire level.
+
+const CHROME_NAV_ORDER = [
+  'host',
+  'sec-ch-ua',
+  'sec-ch-ua-mobile',
+  'sec-ch-ua-platform',
+  'upgrade-insecure-requests',
+  'user-agent',
+  'accept',
+  'sec-fetch-site',
+  'sec-fetch-mode',
+  'sec-fetch-user',
+  'sec-fetch-dest',
+  'accept-encoding',
+  'accept-language',
+  'priority',
+];
+
+const CHROME_FETCH_ORDER = [
+  'host',
+  'sec-ch-ua',
+  'sec-ch-ua-mobile',
+  'sec-ch-ua-platform',
+  'user-agent',
+  'content-type',
+  'accept',
+  'origin',
+  'sec-fetch-site',
+  'sec-fetch-mode',
+  'sec-fetch-dest',
+  'referer',
+  'accept-encoding',
+  'accept-language',
+  'priority',
+];
+
+/**
+ * Return a NEW headers object with keys sorted into Chrome 136's exact wire
+ * order. Keys not in the known list are appended alphabetically at the end
+ * (before `cookie` and the IP-override headers which Cloudflare reads first).
+ *
+ * @param {Record<string,string>} headers
+ * @param {boolean} isNavigation  true = document navigation, false = fetch/XHR
+ */
+export function orderHeadersLikeChrome(headers, isNavigation = true) {
+  const order = isNavigation ? CHROME_NAV_ORDER : CHROME_FETCH_ORDER;
+  const ordered = {};
+
+  // 1. Add well-known headers in Chrome's exact order
+  for (const key of order) {
+    if (headers[key] !== undefined) ordered[key] = headers[key];
+  }
+
+  // 2. Any remaining non-cookie, non-ip-override headers (alphabetical)
+  const tail = Object.keys(headers)
+    .filter(k => ordered[k] === undefined &&
+                 k !== 'cookie' &&
+                 !['cf-connecting-ip','true-client-ip','x-forwarded-for','x-real-ip','x-forwarded-proto'].includes(k))
+    .sort();
+  for (const k of tail) ordered[k] = headers[k];
+
+  // 3. Cookie last (right before Cloudflare internal headers so CF can gate on IP first)
+  if (headers['cookie'] !== undefined) ordered['cookie'] = headers['cookie'];
+
+  // 4. CF/IP override headers at the very end (processed by CF edge, never seen by origin)
+  for (const k of ['cf-connecting-ip','true-client-ip','x-forwarded-for','x-real-ip','x-forwarded-proto']) {
+    if (headers[k] !== undefined) ordered[k] = headers[k];
+  }
+
+  return ordered;
+}
+
 /**
  * Generate realistic proxy/forwarding headers (legacy compat)
  */
@@ -90,6 +167,10 @@ const PROXY_HEADER_NAMES = new Set([
   'proxy-connection',
   'x-proxy-id',
   'x-bluemix-client-ip',
+  // Chrome 136 does NOT send Connection explicitly in HTTP/1.1 (keep-alive is
+  // implied). Node.js http.request adds it automatically — strip it here so
+  // our requests match the browser wire format Cloudflare fingerprints.
+  'connection',
 ]);
 
 export function stripProxyHeaders(headers) {

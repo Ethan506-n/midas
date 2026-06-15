@@ -17,6 +17,7 @@ import { detectChallengeType, hasCFClearance, extractCFRayId, attemptIUAMSolve }
 import { getSiteConfig, getMaxRetries, getSiteSpecificHeaders, noBypassHeaders } from './site-configs.js';
 import { shouldRetryRequest, getRetryDelayMs, analyzeErrorResponse } from './error-strategies.js';
 import { renderPageWithJS, handleJSChallenge, isAvailable as isBrowserAvailable, closeBrowser } from './browser-automation.js';
+import { tryViaRelay, tryViaProxyTunnel } from './cf-bypass.js';
 import { solveCaptcha } from './captcha-solver.js';
 import { injectAntiDetectionScripts } from './webdriver-bypass.js';
 
@@ -713,36 +714,47 @@ function rewriteJs(js, baseUrl) {
 }
 
 function buildError1000Page(hostname, targetUrl) {
+  const enc = encodeURIComponent(targetUrl);
+  const gcacheUrl  = `https://webcache.googleusercontent.com/search?q=cache:${encodeURIComponent(targetUrl)}`;
+  const archiveUrl = `https://web.archive.org/web/${encodeURIComponent(targetUrl)}`;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Site Blocked — ${hostname}</title>
+<title>Site Restricted — ${hostname}</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f0f13;color:#e2e2e9;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
-  .card{background:#1a1a24;border:1px solid #2e2e42;border-radius:16px;padding:40px;max-width:480px;width:100%;text-align:center}
-  .icon{font-size:48px;margin-bottom:20px}
-  h1{font-size:22px;font-weight:700;margin-bottom:10px;color:#f0f0f8}
-  p{font-size:15px;color:#9090a8;line-height:1.6;margin-bottom:16px}
-  .domain{display:inline-block;background:#0f0f18;border:1px solid #2e2e42;border-radius:8px;padding:6px 14px;font-family:monospace;font-size:14px;color:#a0a0c0;margin-bottom:24px}
-  .reason{background:#1e1020;border:1px solid #3a1e4a;border-radius:8px;padding:14px 18px;font-size:13px;color:#c090d8;line-height:1.5;text-align:left;margin-bottom:24px}
-  .reason strong{color:#e0a0f8}
-  .btn{display:inline-block;background:#6c4aff;color:#fff;border:none;border-radius:10px;padding:12px 28px;font-size:15px;font-weight:600;cursor:pointer;text-decoration:none}
-  .btn:hover{background:#7c5aff}
+  .card{background:#1a1a24;border:1px solid #2e2e42;border-radius:16px;padding:36px;max-width:500px;width:100%;text-align:center}
+  .icon{font-size:44px;margin-bottom:18px}
+  h1{font-size:20px;font-weight:700;margin-bottom:8px;color:#f0f0f8}
+  p{font-size:14px;color:#9090a8;line-height:1.6;margin-bottom:20px}
+  .domain{display:inline-block;background:#0f0f18;border:1px solid #2e2e42;border-radius:8px;padding:5px 12px;font-family:monospace;font-size:13px;color:#a0a0c0;margin-bottom:20px}
+  .reason{background:#1a1020;border:1px solid #3a1e3a;border-radius:8px;padding:12px 16px;font-size:13px;color:#b080c8;line-height:1.5;text-align:left;margin-bottom:22px}
+  .reason strong{color:#d090e8}
+  .actions{display:flex;flex-direction:column;gap:10px}
+  .btn{display:block;border:none;border-radius:10px;padding:11px 20px;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;text-align:center;transition:opacity .15s}
+  .btn:hover{opacity:.85}
+  .btn-primary{background:#6c4aff;color:#fff}
+  .btn-secondary{background:#252535;color:#c0c0d8;border:1px solid #3a3a50}
+  .btn-archive{background:#1a2a1a;color:#80c880;border:1px solid #2a4a2a}
 </style>
 </head>
 <body>
 <div class="card">
-  <div class="icon">🚫</div>
-  <h1>Cloudflare Blocked This Request</h1>
+  <div class="icon">🔒</div>
+  <h1>This Site Blocks Proxy Access</h1>
   <div class="domain">${hostname}</div>
-  <p>This site is protected by Cloudflare and detected that the request is coming from a datacenter IP address, which it prohibits (Error 1000).</p>
+  <p>This site uses Cloudflare's strict datacenter-block policy (Error 1000). The proxy automatically tried multiple bypass methods — try the alternatives below.</p>
   <div class="reason">
-    <strong>Why this happens:</strong> Cloudflare's network identifies the proxy server's outbound IP as a datacenter address and blocks it to prevent routing loops. This is a Cloudflare policy decision — not something that can be resolved by retrying.
+    <strong>Try a cached version:</strong> Google Cache and the Wayback Machine serve content directly without going through Cloudflare, so they always work for this site.
   </div>
-  <a class="btn" href="javascript:history.back()">← Go Back</a>
+  <div class="actions">
+    <a class="btn btn-archive" href="javascript:void(0)" onclick="window.top.location.href='${gcacheUrl}'">📋 Open Google Cache</a>
+    <a class="btn btn-archive" href="javascript:void(0)" onclick="window.top.location.href='${archiveUrl}'">🗂️ Open Wayback Machine</a>
+    <a class="btn btn-secondary" href="javascript:history.back()">← Go Back</a>
+  </div>
 </div>
 </body>
 </html>`;
@@ -1357,21 +1369,59 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
         // Check for Cloudflare challenges with site-specific retry limits
         const maxRetries = getMaxRetries(url.hostname);
 
-        // Error 1000 ("DNS points to prohibited IP"): Cloudflare's edge sees our datacenter
-        // IP as a routing conflict.  We retry up to 3 times — each retry calls
-        // buildResidentialIpHeaders() which picks a new residential IP, so Cloudflare
-        // sees a different home-user IP on each attempt.
+        // Error 1000 ("DNS points to prohibited IP"): CF sees Replit's outbound IP as being
+        // within Cloudflare's own infrastructure, which it treats as a routing loop.
+        // Header spoofing CANNOT fix this — CF checks the actual TCP source IP.
+        //
+        // Real bypass: route the request through a non-CF relay service whose IP is
+        // outside Cloudflare's datacenter ranges.  We try three free relay services
+        // (allorigins.win, corsproxy.io, codetabs.com) in sequence.  If any succeeds
+        // we rewrite the returned HTML and serve it just like a normal proxied page.
+        // Only if every relay fails do we show the error page with cache links.
         if (isHtml && isCloudflareError1000(text)) {
-          if (depth < 3) {
-            console.log(`[CF] Error 1000 on ${url.hostname} (attempt ${depth + 1}/3) — retrying with fresh residential IP`);
-            browseHandler(req, res, targetUrl, depth + 1);
+          console.log(`[CF-1000] ${url.hostname} blocked — attempting relay bypass`);
+
+          if (req.method === 'GET') {
+            try {
+              const relayed = await tryViaRelay(targetUrl);
+              if (relayed) {
+                const rewritten = rewriteHtml(relayed.body, targetUrl, baseProxyUrl);
+                outHeaders['content-type'] = 'text/html; charset=utf-8';
+                outHeaders['x-cf-bypass'] = relayed.source;
+                delete outHeaders['content-length'];
+                res.writeHead(200, outHeaders);
+                res.end(rewritten);
+                console.log(`[CF-1000] ${url.hostname} served via ${relayed.source}`);
+                return;
+              }
+            } catch (bypassErr) {
+              console.log(`[CF-1000] relay bypass threw: ${bypassErr.message}`);
+            }
           } else {
-            console.log(`[CF] Error 1000 on ${url.hostname} — all residential IP retries exhausted`);
-            outHeaders['content-type'] = 'text/html; charset=utf-8';
-            delete outHeaders['content-length'];
-            res.writeHead(403, outHeaders);
-            res.end(buildError1000Page(url.hostname, targetUrl));
+            // POST/PUT/etc — try HTTP CONNECT tunnel through non-CF public proxies
+            try {
+              const tunneled = await tryViaProxyTunnel(targetUrl, { method: req.method, headers: orderedHeaders });
+              if (tunneled && tunneled.body) {
+                const isHtmlResp = (tunneled.body.trimStart().startsWith('<!') || tunneled.body.trimStart().startsWith('<html'));
+                const body = isHtmlResp ? rewriteHtml(tunneled.body, targetUrl, baseProxyUrl) : tunneled.body;
+                outHeaders['content-type'] = isHtmlResp ? 'text/html; charset=utf-8' : 'application/json';
+                delete outHeaders['content-length'];
+                res.writeHead(tunneled.statusCode || 200, outHeaders);
+                res.end(body);
+                console.log(`[CF-1000] ${url.hostname} POST tunneled (${tunneled.statusCode})`);
+                return;
+              }
+            } catch (tunnelErr) {
+              console.log(`[CF-1000] proxy tunnel threw: ${tunnelErr.message}`);
+            }
           }
+
+          // All bypass attempts failed — show error page with Google Cache / Wayback links
+          console.log(`[CF-1000] ${url.hostname} — all bypass methods exhausted, showing error page`);
+          outHeaders['content-type'] = 'text/html; charset=utf-8';
+          delete outHeaders['content-length'];
+          res.writeHead(403, outHeaders);
+          res.end(buildError1000Page(url.hostname, targetUrl));
           return;
         }
 

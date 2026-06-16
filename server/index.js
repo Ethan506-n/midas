@@ -5,6 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { router, SESSION_TARGETS } from './router.js';
 import { wsUpgradeHandler } from './ws-bridge.js';
+import { startTor } from './tor-proxy.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.resolve(__dirname, '../public');
@@ -58,7 +59,7 @@ const INDEX_HTML = `<!doctype html>
 <script>
 (()=>{
   const ENGINES = {
-    ddg:   q => 'https://duckduckgo.com/?q=' + encodeURIComponent(q),
+    ddg:   q => 'https://duckduckgo.com/?q=' + encodeURIComponent(q) + '&kd=-1&kp=-2&kl=us-en',
     bing:  q => 'https://www.bing.com/search?q=' + encodeURIComponent(q),
     brave: q => 'https://search.brave.com/search?q=' + encodeURIComponent(q),
     wiki:  q => 'https://en.wikipedia.org/w/index.php?search=' + encodeURIComponent(q)
@@ -407,3 +408,6 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 server.listen(PORT, HOST);
+
+// Start Tor in the background — DDG requests will use it once bootstrapped
+startTor().catch(err => console.log('[TOR] Startup error:', err.message));

@@ -1,0 +1,1 @@
+- [DDG via Tor](ddg-tor.md) — DDG bot challenge is IP-level (datacenter block); client-side spoofing can't fix it; Tor SOCKS5 is the only free solution.

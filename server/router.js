@@ -18,6 +18,7 @@ import { getSiteConfig, getMaxRetries, getSiteSpecificHeaders, noBypassHeaders }
 import { shouldRetryRequest, getRetryDelayMs, analyzeErrorResponse } from './error-strategies.js';
 import { renderPageWithJS, handleJSChallenge, isAvailable as isBrowserAvailable, closeBrowser } from './browser-automation.js';
 import { tryViaRelay, tryViaProxyTunnel } from './cf-bypass.js';
+import { getTorAgent } from './tor-proxy.js';
 import { solveCaptcha } from './captcha-solver.js';
 import { injectAntiDetectionScripts } from './webdriver-bypass.js';
 
@@ -1206,26 +1207,35 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
 
   // Use pooled agent for connection reuse and rate limiting
   const pooledAgent = getAgent(url.hostname, isHttps);
-  
-  // Try to resolve with alternative DNS to bypass ISP blocks.
-  // Exception: Cloudflare edge IPs must never be used as direct connection targets —
-  // connecting to them by IP without SNI causes Error 1000 ("DNS points to prohibited IP")
-  // because Cloudflare's shared edge requires the TLS SNI hostname to route the request.
+
+  // DDG hostnames are routed through Tor to mask the datacenter IP.
+  // Tor resolves DNS internally (socks5h), so we must use the hostname directly —
+  // never a pre-resolved IP — and skip the normal DNS bypass step.
+  const isDDGHost = url.hostname === 'duckduckgo.com' || url.hostname.endsWith('.duckduckgo.com');
+  const torAgent = isDDGHost ? getTorAgent() : null;
+
   let resolvedIp = url.hostname;
-  try {
-    const candidate = await resolveWithFallback(url.hostname);
-    if (candidate && candidate !== url.hostname) {
-      if (isCloudflareIp(candidate)) {
-        console.log(`[BYPASS] ${url.hostname} -> ${candidate} is a Cloudflare edge IP, using hostname directly to preserve SNI`);
-        // Leave resolvedIp = url.hostname so the OS resolves it with full SNI
-      } else {
-        resolvedIp = candidate;
-        console.log(`[BYPASS] Using IP ${resolvedIp} for ${url.hostname}`);
+  if (torAgent) {
+    // Tor handles DNS — do not pre-resolve or we leak the real IP query
+    console.log(`[TOR] Routing ${url.hostname} through Tor exit node`);
+  } else {
+    // Try to resolve with alternative DNS to bypass ISP blocks.
+    // Exception: Cloudflare edge IPs must never be used as direct connection targets —
+    // connecting to them by IP without SNI causes Error 1000 ("DNS points to prohibited IP")
+    // because Cloudflare's shared edge requires the TLS SNI hostname to route the request.
+    try {
+      const candidate = await resolveWithFallback(url.hostname);
+      if (candidate && candidate !== url.hostname) {
+        if (isCloudflareIp(candidate)) {
+          console.log(`[BYPASS] ${url.hostname} -> ${candidate} is a Cloudflare edge IP, using hostname directly to preserve SNI`);
+        } else {
+          resolvedIp = candidate;
+          console.log(`[BYPASS] Using IP ${resolvedIp} for ${url.hostname}`);
+        }
       }
+    } catch (err) {
+      console.log(`[BYPASS] Failed to resolve ${url.hostname}, using hostname directly`);
     }
-  } catch (err) {
-    console.log(`[BYPASS] Failed to resolve ${url.hostname}, using hostname directly`);
-    // Fall through to use hostname
   }
 
   // When connecting via a raw IP, TLS has no hostname for SNI unless we set servername.
@@ -1239,8 +1249,8 @@ async function browseHandlerImplAsync(req, res, url, jar, targetUrl, depth, lib,
     method: req.method,
     headers: orderedHeaders,
     rejectUnauthorized: false,
-    agent: pooledAgent,
-    ...(isHttps && usingIp ? { servername: url.hostname } : {}),
+    agent: torAgent || pooledAgent,
+    ...(isHttps && (usingIp || torAgent) ? { servername: url.hostname } : {}),
   };
 
   // Debug logging for problematic sites

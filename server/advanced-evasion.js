@@ -217,6 +217,14 @@ export function isBotDetectionPage(html) {
     lower.includes('robot')
   )) return true;
   
+  // DuckDuckGo anomaly challenge — "bots use duckduckgo too"
+  if (
+    lower.includes('bots use duckduckgo') ||
+    lower.includes('select all squares containing a duck') ||
+    lower.includes('duckduckgo too') ||
+    (lower.includes('duckduckgo') && lower.includes('complete the following challenge'))
+  ) return true;
+
   // Generic bot detection patterns
   return (
     (lower.includes('bot') && lower.includes('detect')) ||
